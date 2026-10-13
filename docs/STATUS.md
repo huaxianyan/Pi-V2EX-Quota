@@ -1,5 +1,11 @@
 # 开发进度
 
+## 当前主线
+
+维护 V2EX provider 隔离、配额等待、临时窗口和 Smart Compact 补救。代码已推送，默认关闭临时窗口。下方 2026-10-08 / 01 的未提交状态属于旧阶段，已由后续实现取代。
+
+接手先读最新条目，再读 README 的安装与命令说明，以及 Smart Compact fork 的接口文档。本机路径与操作约定见本地 `AGENTS.md`。
+
 ## 2026-10-08 / 01：V2EX 临时上下文窗口
 
 状态：本地开发完成，基于 `main` 的 `3e7a26a`，本轮改动尚未提交和部署。
@@ -49,7 +55,7 @@
 - V2EX 全量 Node 测试 89 项通过，含状态栏窗口段与 `compact status` 的开关文案。
 - Smart Compact 定向检查共 8 项通过：接口成功及超时两项，现有工具回归六项。补齐测试 fixture 的事件总线后仅重跑此前失败的一项。
 - 相关源码严格 TypeScript 检查通过，库目标与既有代码对齐为 ES2024。
-- 真实 pi 集成 `SMART_COMPACT_EXTENSION=E:/dev/pi-smart-compact/dist/index.js node tools/verify-compact-window.mjs --recovery` 通过：初次自动压缩失败、保存计划、配额等待、重载恢复、补救摘要应用、任务续跑。
+- 真实 pi 集成通过：设置 `SMART_COMPACT_EXTENSION` 指向 fork 的 `dist/index.js`，执行 `node tools/verify-compact-window.mjs --recovery`。覆盖初次自动压缩失败、保存计划、配额等待、重载恢复、补救摘要应用和任务续跑。
 - 模型及配额响应均为 fixture，未请求真实 V2EX。模型和 pi 设置文件保持原样，验收临时目录已清理。
 - Git 安装使用 fork 中预构建的入口及协议模块，不直接修改已安装 npm 包。
 
@@ -59,3 +65,13 @@
 - Smart Compact：`git:github.com/huaxianyan/pi-smart-compact@v2ex-recovery`。移除旧 npm 来源，避免加载两个实例。
 - 重启或 `/reload` 后，按需执行 `/v2ex compact window 400k`。默认仍关闭，不修改 `models.json`。
 - 下一步只需在真实 V2EX 长会话中观察摘要质量及上游成功率。现有 fixture 验收不替代该检查。
+
+## 2026-10-13 / 03：核对现有交接入口
+
+- 本轮基线：`huaxianyan/pi-v2ex-quota` 的 `main`，提交 `96ab708`。状态栏窗口段与 Smart Compact 自动开关已进入代码基线。
+- 沿用本文件，补 README 交接链接，明确旧阶段状态与当前主线，移出历史验证命令中的实际机器路径。
+- 历史边界：89 项 Node 测试、类型检查和真实 pi fixture 配合结果沿用前述记录。本轮未重跑，也未请求真实 V2EX。
+- 安装边界：历史已经按 Git 来源部署，本轮未更新或检查安装副本，没有修改模型、压缩设置或等待计划。
+- 本机托管安装的入口与依赖按本地约定定位，不能把 README 中 npm 全局安装示例当作本机事实。
+- 待办：真实长会话的摘要质量与上游成功率仍需观察，凭据接入统一尚未实施。现有凭据解析不等于已经支持所有 pi 认证来源。
+- CI 与发布：此次文档推送后的结果未查询，没有发版或运行集成脚本。
