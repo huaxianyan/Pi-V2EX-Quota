@@ -783,7 +783,21 @@ function providerError(text: string) {
 
 /** 实测原话：一次 Cloudflare 522 断掉整轮会话，pi 没有重试。 */
 const BAD_GATEWAY = "522 status code (no body)";
+/** 实测原话：V2EX 这一轮没吐出可见内容时报的就是这句。 */
+const EMPTY_RESPONSE = "AI Chat returned no visible response. Please try again.";
 const RESUME_PROMPT = "配额已刷新，继续完成任务。";
+
+/** pi 正常完成一轮时，正文是一块纯文本。 */
+function assistantText(text: string) {
+  return {
+    type: "message_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text }],
+    },
+  };
+}
 
 test("上游 522 在开启重试后于本轮结束时刻排期", async () => {
   const restore = stubQuota(
@@ -809,6 +823,98 @@ test("上游 522 在开启重试后于本轮结束时刻排期", async () => {
     const notes = ext.notifications.map((item) => item.message).join(" / ");
     assert.ok(notes.includes("HTTP 522"), `通知里没说明故障：${notes}`);
     assert.equal(ext.sent.length, 0, "排期时不该注入消息");
+  } finally {
+    restore();
+  }
+});
+
+test("上游空响应（报错形态）同样按退避排期重试", async () => {
+  const restore = stubQuota(
+    () => 4_000_000,
+    () => Date.now() + 3_600_000,
+  );
+  try {
+    const ext = await startExtension({ retryOnError: true, errorRetrySeconds: 60 });
+    await ext.emit("session_start", { type: "session_start", reason: "startup" });
+    await sleep(60);
+
+    await ext.emit("message_end", providerError(EMPTY_RESPONSE));
+    assert.equal(readPlan(ext.dir), undefined, "message_end 阶段不该抢在收尾前排期");
+
+    await ext.emit("agent_settled", { type: "agent_settled" });
+    const plan = readPlan(ext.dir);
+    assert.ok(plan, "空响应没有排入重试");
+    assert.equal(plan.reason, "error");
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /^V2EX 重试 /);
+    assert.ok(
+      ext.notifications.some((item) => item.message.includes("空响应")),
+      `通知里没说明故障：${ext.notifications.map((item) => item.message).join(" / ")}`,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("上游空响应（正文形态）也排入重试，正常回复则不动", async () => {
+  const restore = stubQuota(
+    () => 4_000_000,
+    () => Date.now() + 3_600_000,
+  );
+  try {
+    const ext = await startExtension({ retryOnError: true, errorRetrySeconds: 60 });
+    await ext.emit("session_start", { type: "session_start", reason: "startup" });
+    await sleep(60);
+
+    // 先来一轮真的干了活的回复：不该被误判。
+    await ext.emit("message_end", assistantText("改好了，顺手补了用例。"));
+    await ext.emit("agent_settled", { type: "agent_settled" });
+    assert.equal(readPlan(ext.dir), undefined, "正常回复不该排重试");
+
+    // 正文里混着工具调用也不算「整轮没有可见内容」。
+    await ext.emit("message_end", {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        stopReason: "stop",
+        content: [{ type: "text", text: EMPTY_RESPONSE }, { type: "toolCall", name: "read" }],
+      },
+    });
+    await ext.emit("agent_settled", { type: "agent_settled" });
+    assert.equal(readPlan(ext.dir), undefined, "带工具调用的回复不该排重试");
+
+    // 上游把这句话当正文返回时，pi 认为这一轮正常完成，得靠扩展认出来。
+    await ext.emit("message_end", assistantText(EMPTY_RESPONSE));
+    assert.equal(readPlan(ext.dir), undefined, "message_end 阶段不该抢在收尾前排期");
+
+    await ext.emit("agent_settled", { type: "agent_settled" });
+    const plan = readPlan(ext.dir);
+    assert.ok(plan, "正文形态的空响应没有排入重试");
+    assert.equal(plan.reason, "error");
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /^V2EX 重试 /);
+  } finally {
+    restore();
+  }
+});
+
+test("关闭上游重试时空响应只提示怎么开", async () => {
+  const restore = stubQuota(
+    () => 4_000_000,
+    () => Date.now() + 3_600_000,
+  );
+  try {
+    const ext = await startExtension({ retryOnError: false });
+    await ext.emit("session_start", { type: "session_start", reason: "startup" });
+    await sleep(60);
+
+    await ext.emit("message_end", assistantText(EMPTY_RESPONSE));
+    await ext.emit("agent_settled", { type: "agent_settled" });
+
+    assert.equal(readPlan(ext.dir), undefined, "开关关着就不该排期");
+    assert.equal(ext.sent.length, 0);
+    assert.ok(
+      ext.notifications.some((item) => item.message.includes("/v2ex retry on")),
+      `没告诉用户怎么开启：${ext.notifications.map((item) => item.message).join(" / ")}`,
+    );
   } finally {
     restore();
   }

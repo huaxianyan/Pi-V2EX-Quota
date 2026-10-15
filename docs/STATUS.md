@@ -2,9 +2,9 @@
 
 ## 当前主线
 
-维护 V2EX provider 隔离、配额等待、临时窗口和 Smart Compact 补救。代码已推送，默认关闭临时窗口。下方 2026-10-08 / 01 的未提交状态属于旧阶段，已由后续实现取代。
+维护 V2EX provider 隔离、配额等待、临时窗口、Smart Compact 补救与上游故障重试。代码已推送，默认关闭临时窗口与上游重试。接手先读最新条目，再读 README 的安装与命令说明，以及 Smart Compact fork 的接口文档。本机路径与操作约定见本地 `AGENTS.md`。
 
-接手先读最新条目，再读 README 的安装与命令说明，以及 Smart Compact fork 的接口文档。本机路径与操作约定见本地 `AGENTS.md`。
+下方 2026-10-08 / 01 的未提交状态属于旧阶段，已由后续实现取代。
 
 ## 2026-10-08 / 01：V2EX 临时上下文窗口
 
@@ -75,3 +75,29 @@
 - 本机托管安装的入口与依赖按本地约定定位，不能把 README 中 npm 全局安装示例当作本机事实。
 - 待办：真实长会话的摘要质量与上游成功率仍需观察，凭据接入统一尚未实施。现有凭据解析不等于已经支持所有 pi 认证来源。
 - CI 与发布：此次文档推送后的结果未查询，没有发版或运行集成脚本。
+
+## 2026-10-15 / 04：空响应重试与自检脚本的假上游接管
+
+状态：本地完成并提交，基线 `7fca034`。上一轮遗留的未提交改动（空响应识别）在本轮补齐验证与文档后一并入库。
+
+### 本轮完成
+
+- 上游「整轮没有可见内容」（`AI Chat returned no visible response.` / `AI Chat 没有返回可见内容`）纳入瞬时故障：`TransientErrorKind` 增加 `empty`，新增 `EMPTY_RESPONSE_PATTERN`，并入 `/v2ex retry` 的退避重试。
+- 该故障的两种落法都认：`stopReason` 为 `error` 的报错形态；上游把它当正文返回、pi 以正常 `stop` 收尾的正文形态。正文形态只在「这一轮恰好一块纯文本、且没有工具调用」时才认，避免把正常回复误判成空响应。
+- 修复自检脚本的假上游接管：`prepareAgentDir` 原先只改了扩展自己的 `baseUrl`，而补全请求是 pi 按 `models.json` 自己发的，于是假上游只收得到配额请求，「补全固定 522」从未生效。现在同时改写临时目录里 `models.json` 的 `v2ex.baseUrl`。
+- 新增真机用例 `--case retry-empty`（`npm run verify:retry-empty`）：假上游按 openai-completions 的流式协议把空响应那句当正文返回，200 正常收尾。用例断言正文恰好一块纯文本、`stopReason` 为 `stop`、pi 自己的 `auto_retry_start` 为 0、扩展归类为「空响应」并排入 `reason=error` 的重试。
+
+### 验证与边界
+
+- V2EX 全量 Node 测试 92 项通过，新增 3 项覆盖报错形态、正文形态（含带工具调用与正常回复的反例）与开关关闭时的提示。
+- 严格 TypeScript 检查对 `src/` 与 `test/` 全部通过 —— 但用一个声明桩替换了 `pi-smart-compact/extension-api` 的类型入口，原因见待办。
+- 真机自检：`retry`、`retry-empty` 通过，`start-live` 回归通过。三条都打 127.0.0.1 假上游，未请求真实 V2EX，临时 agent 目录已清理。
+- 修正一处此前被记成事实的错误结论：`retry` 用例原先并未把 522 送到 pi，pi 报的是连不上真实端点的 `Connection error.`，因此「pi 会先快速重试三次」被当成了 522 的行为。实测 522 不在 pi 的可重试清单里（清单收了 500 / 502 / 503 / 504 / 520 / 524，没有 522），pi 一次都不重试，扩展在同一个 `agent_settled` 上接手；`Connection error.` 那种措辞走的是网络那条路。README 中英两版已同步，含实测输出。
+- `start` / `rearm` 仍打真实配额接口，本机需直连或设 `V2EX_VERIFY_PROXY`，本轮未跑。
+- 空响应在真实长会话里的触发频率与重试成功率未观察；现有假上游验收只证明链路成立。
+
+### 待办
+
+- `npm run typecheck` 目前不可用：仓库没有 `tsconfig.json`，`tsc --noEmit` 只会打印帮助；补上配置后还会撞到依赖侧问题 —— `pi-smart-compact` 的 `exports["./extension-api"].types` 指向 `src/extension-api.ts`，而它 import 的 `./constants.ts` 不在该包 `files` 里，直接检查会报 TS2307。要么在 fork 里把 `types` 指向随包发布的产物，要么在本仓库用 `paths` 映射绕开。
+- 仓库没有 `package-lock.json`；`pi-smart-compact` 按分支 `v2ex-recovery` 解析，分支移动会静默换实现。是否引入锁文件待定。
+- 真实长会话的摘要质量与上游成功率仍需观察。

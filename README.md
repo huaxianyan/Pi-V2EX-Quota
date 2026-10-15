@@ -9,7 +9,7 @@
 1. **状态栏显示**：额度进度条、剩余百分比、距窗口重置的倒计时（最后一分钟逐秒走，归零改说 `即将开始`），外加自动续跑、上游重试和临时窗口的当前状态。
 2. **立刻接手**：配额用尽时（HTTP 429 + token 余额归零）马上中止本轮，不再陪 pi 把三次退避重试跑完。
 3. **自动续跑**（可选开关）：等到窗口刷新，先复核配额，再注入一条消息让 agent 接着做没做完的事。
-4. **上游故障重试**（可选开关，默认关闭）：5xx / 超时 / 连接中断把本轮打断时，等一段退避时间后自动接着做。
+4. **上游故障重试**（可选开关，默认关闭）：5xx / 超时 / 连接中断 / 整轮没有可见内容把本轮打断时，等一段退避时间后自动接着做。
 5. **临时上下文窗口**（默认关闭）：在当前会话中缩小 V2EX 的窗口声明，提前触发 pi 自动压缩，摘要由已加载的 Smart Compact 处理。
 
 ## 开发交接
@@ -67,7 +67,7 @@ pi -e /path/to/pi-v2ex-quota/src/index.ts
 | --- | --- | --- |
 | `status` | `true` | 在状态栏显示配额 |
 | `autoWait` | `false` | 配额用尽时等待刷新并自动续跑 |
-| `retryOnError` | `false` | 上游 5xx / 超时 / 连接中断时退避重试 |
+| `retryOnError` | `false` | 上游 5xx / 超时 / 连接中断 / 空响应时退避重试 |
 | `compactWindowEnabled` | `false` | 启用当前会话的临时窗口 |
 | `compactWindowTokens` | `400000` | 目标窗口大小，单位 tokens |
 | `errorRetrySeconds` | `60` | 上游故障后的首次重试等待秒数，之后翻倍，范围 5–3600 |
@@ -149,7 +149,7 @@ V2EX -- | 续跑 关 · 重试 关 · 窗口 关                        还没�
 
 ## 上游故障自动重试
 
-配额墙之外还有一类中断：上游 5xx、请求超时、连接断掉。这类故障重试往往就能成，但 pi 自己的重试只覆盖开头的十几秒。
+配额墙之外还有一类中断：上游 5xx、请求超时、连接断掉，以及整轮没有可见内容。这类故障重试往往就能成，但 pi 自己的重试只覆盖它清单里的那几种错误。
 
 **默认关闭**，`/v2ex retry on` 打开。判定口径只认「再试一次有可能成」的错误：
 
@@ -158,16 +158,19 @@ V2EX -- | 续跑 关 · 重试 关 · 窗口 关                        还没�
 | 5xx（含 522）与 429 限流 | 其它 4xx（400 / 401 / 404…） |
 | 请求超时 | 配额用尽（归自动续跑管） |
 | 连接中断（`ECONNRESET`、`socket hang up`、`Connection error.`） | 识别不出来的报错 |
+| 整轮没有可见内容（`AI Chat returned no visible response.`） | 光有一句「请重试」 |
 
 几条边界：
 
-- **不与 pi 内建重试打架**。pi 自己会先做三次快速重试（2s / 4s / 8s，每次都重跑一轮 agent），扩展接的是它放弃之后的那一刻 —— `agent_settled`。所以真实节奏是：pi 快速试三次（约 55 秒），还不行才轮到扩展的分钟级退避。
+- **不与 pi 内建重试打架**。pi 自己有一份可重试清单（`500` / `502` / `503` / `504` / `520` / `524`、`Connection error.`、`timeout` 等），命中的它会先做三次快速重试（2s / 4s / 8s，每次都重跑一轮 agent，合计约 55 秒），扩展接的是它放弃之后的那一刻 —— `agent_settled`。
+- **522 与空响应都不在 pi 的清单里，pi 一次都不会重试**。清单里有 `500` / `502` / `503` / `504` / `520` / `524`，偏偏没有 `522`；空响应那句的 `Please try again` 也对不上它认的 `try your request again` / `please retry your request`。这两类故障 pi 会直接结束本轮，扩展在同一个 `agent_settled` 上就接住了。真机自检的 `retry` 与 `retry-empty` 两条都实测到 pi 自己的 `auto_retry_start` 为 0 次。
+- **空响应有两种落法，都认**。一种是真的报错（`stopReason` 为 `error`），另一种是上游把这句话当正文返回（`stopReason` 是正常的 `stop`）—— 后一种 pi 认为这一轮正常完成，不报错也不重试，会话就停在那一句话上，只有扩展能认出来。识别口径收得很窄：这一轮必须只有一块纯文本、且没有工具调用；真机自检 `retry-empty` 已确认上游就是这么落的。
 - **退避翻倍**。首次等 `errorRetrySeconds`，之后每次翻倍，封顶 15 分钟；累计到 `maxErrorRetries` 次就停下来告诉你。
 - **跟额度无关**。到点即重试，不做配额预检 —— 上游挂了和有没有额度是两件事。真撞上配额墙，配额那条路会另行接手。
 - **一次成功就清零**。某个请求真的走通了，连续故障的计数归零；你自己接管本轮也会归零。
 - **等待计划同样落盘**。重启 pi 能接着等；但如果 `retry off` 关掉了，「启动时恢复计划」也会一并跳过。
 
-状态栏的配额段会切成 `V2EX 重试 45s`（开关段照旧），进入最后一分钟同样逐秒走，归零后是 `V2EX 即将重试`。通知里写清是哪一类故障（`HTTP 522` / 请求超时 / 连接中断）与第几次重试。
+状态栏的配额段会切成 `V2EX 重试 45s`（开关段照旧），进入最后一分钟同样逐秒走，归零后是 `V2EX 即将重试`。通知里写清是哪一类故障（`HTTP 522` / 请求超时 / 连接中断 / 空响应）与第几次重试。
 
 ## 临时窗口与自动压缩
 
@@ -213,7 +216,7 @@ Smart Compact 的分支级开关由它自己管理，扩展只检查全局设置
 补救成功后自动应用摘要，再继续原任务，全程免 Apply 确认。
 补救应用只接受本次已验证的摘要，失败时停留在原会话。
 
-补救前会查询配额。配额用尽就等刷新，超时和连接故障按 `errorRetrySeconds` 退避。
+补救前会查询配额。配额用尽就等刷新，超时、连接故障和空响应按 `errorRetrySeconds` 退避。
 恢复计划保存原会话、模型和任务分支，重启后恢复同一个会话即可接着处理。
 关闭 pi 再新建会话，属于另一个任务，旧计划结束。
 每次计划最多检查 `1 + maxErrorRetries` 次，包括配额复核，默认 4 次。
@@ -317,8 +320,9 @@ x-ai-chat-extra-usage-remaining: 0
 - **秒级倒计时不靠轮询**。`pollSeconds` 默认 60 秒，等它还差一分钟时按分钟级刷新的话，屏幕上就是一个不动的数字。所以排期之后会另挂两个定时器：一个在「进入最后一分钟」那一刻到点（等待排在一分钟以外时不逐秒空转），一个在最后一分钟里每秒刷一次状态栏。两个都是 unref 的，并且计划一被收走（续跑注入、用户取消）就自己停掉。它只是展示用的本地倒计时，不追求与服务端对齐。
 - **拿不到配额快照时会先退化成 5 分钟兜底**。`agent_settled` 排期用的重置时间来自最近一次配额查询；如果会话刚起、第一次轮询还没回来，那一刻就没有重置时间可用，只能先按 5 分钟排一次。到点 `resumeNow` 会重新查配额，发现仍在同一个用尽的窗口里就顺延到真正的重置时间 —— 代价是白跑一次检查、消耗一次 `maxResumeAttempts`。长时间开着的会话不会遇到（实测：会话起 1.3 秒就撞墙时排到 `+5m`，等快照落地后同样场景排到窗口重置时间）。
 
-- **pi 自己有 auto retry，但只覆盖十几秒**。上游报错时 pi 会把整个 agent 轮次重跑一遍，退避 2s → 4s → 8s 共三次，全失败后才发 `auto_retry_end` 与 `agent_settled`（实测于 2026-09-22 的 RPC 事件流）。所以「上游故障重试」这个开关是补在它后面，不是替掉它：一次 522 从发消息到扩展排期，实际间隔约 55 秒。
-- **同一个 522，pi 给出的措辞不止一种**。真机上观察到的是 `522 status code (no body)`；假上游固定返回空 body 的 522 时，pi 给的是 `Connection error.` —— 字面里没有任何可用细节。故障分类必须两种都认，否则重试路径永远不会触发（第一次跑 `verify:retry` 就是这么失败的）。
+- **pi 自己有 auto retry，但只认它清单里的那几种错误**。命中的（`Connection error.`、`timeout`、500 / 502 / 503 / 504 / 520 / 524 等）pi 会把整个 agent 轮次重跑一遍，退避 2s → 4s → 8s 共三次，全失败后才发 `auto_retry_end` 与 `agent_settled`（实测于 2026-09-22 的 RPC 事件流，合计约 55 秒）。`522` 和空响应都不在清单里 —— 清单收了 500 / 502 / 503 / 504 / 520 / 524，偏偏没有 522 —— 这两类 pi 一次都不重试，扩展在同一个 `agent_settled` 上就接手了（实测于 2026-10-15：`verify:retry` 与 `verify:retry-empty` 两条里 `auto_retry_start` 计数都是 0）。
+- **假上游要同时改写 `models.json`，否则它只收得到配额请求**。扩展配置里的 `baseUrl` 只管配额查询，补全请求是 pi 自己按 `models.json` 发的。自检脚本一开始只改了扩展配置，pi 的补全照样打真实的 edge.v2ex.com，于是「补全固定 522」从未真正生效，`verify:retry` 验的其实是真机上碰到的网络错误 —— 直到 2026-10-15 补上这处才名副其实。
+- **措辞不止一种，但要分清是哪种错**。真机上的 522 给的是 `522 status code (no body)`，假上游返回空 body 的 522 给的也是这一句（实测于 2026-10-15）；而 pi 在连不上上游时给的是 `Connection error.` —— 字面里没有任何可用细节。故障分类两条都要认：带状态码的走状态码那条，`Connection error.` 这类连接字面走网络那条，否则重试路径永远不会触发（第一次跑 `verify:retry` 就是这么失败的）。
 
 ## 开发
 
@@ -370,7 +374,7 @@ pi -p "hi" --provider v2ex --model coder --no-session --offline \
 
 ### 真机自检：续跑、重新排期、手动排队与上游重试
 
-`npm test` 用的是假 pi，证明的是扩展自身的逻辑。而真正依赖 pi 生命周期的那几件事 —— `sendUserMessage` 在**会话空闲**时会不会开新一轮、用户接管后等待会不会重新排上、`/v2ex start` 能不能在零 agent 轮次下排期、待续跑的最后一分钟里状态栏会不会逐秒走并在到点改口、上游故障之后能不能按退避接着跑 —— 只有真 pi 能回答。这些由 `tools/verify-resume.mjs` 覆盖：
+`npm test` 用的是假 pi，证明的是扩展自身的逻辑。而真正依赖 pi 生命周期的那几件事 —— `sendUserMessage` 在**会话空闲**时会不会开新一轮、用户接管后等待会不会重新排上、`/v2ex start` 能不能在零 agent 轮次下排期、待续跑的最后一分钟里状态栏会不会逐秒走并在到点改口、上游故障之后能不能按退避接着跑、上游把空响应那句当正文返回时扩展认不认得出 —— 只有真 pi 能回答。这些由 `tools/verify-resume.mjs` 覆盖：
 
 ```bash
 npm run verify:resume          # 到点后能不能真的把一轮对话拉起来
@@ -378,6 +382,7 @@ npm run verify:rearm           # 用户接管本轮后，等待会不会重新�
 npm run verify:start           # /v2ex start 能不能直接排上（需要当时配额已用尽）
 npm run verify:start-live      # /v2ex start 排上后，倒计时与到点续跑能不能真的接上
 npm run verify:retry           # 上游 522 之后能不能按退避自动重试
+npm run verify:retry-empty     # 上游把空响应那句当正文返回时，扩展能不能认出来
 ```
 
 临时窗口的独立验收：
@@ -393,7 +398,7 @@ npm run verify:compact-recovery
 可用 `SMART_COMPACT_EXTENSION` 指定 Smart Compact 的 `dist/index.js` 路径。
 这项验收证明扩展间的配合，V2EX 上游的摘要质量与可用性需在实际使用中观察。
 
-五条续跑 case 都：
+六条续跑 case 都：
 
 1. 用 `PI_CODING_AGENT_DIR` 把 agent 目录整个挪到临时目录，**不碰你真实的配置与等待计划**；
 2. 以 `--mode rpc` 起真 pi 并盯事件流／调试日志；
@@ -477,19 +482,36 @@ wait armed: resume at 2026-09-22T11:15:04.000Z (in 1h12m)
 → 通过
 ```
 
-`retry` 起一个「配额正常、补全固定 522」的假上游，把上游故障演出来。pi 自己要先重试三次才交棒，所以这条 case 要跑一分多钟。实测输出（2026-09-22）：
+`retry` 起一个「配额正常、补全固定 522」的假上游，把上游故障演出来。522 不在 pi 的可重试清单里，所以它一次都不重试、直接交棒，整条 case 十秒内跑完。实测输出（2026-10-15）：
 
 ```
-+  1654ms agent_start（第 1 次）
-+ 11751ms pi 自己的重试：第 1/3 次，2000ms 后
-+ 55836ms pi 自己的重试结束：success=false
-+ 56190ms 已排期: 2026-09-22T11:52:43.164Z（5s 后，reason=error）
-+ 60907ms agent_start（第 5 次）
-+ 60907ms 会话内出现用户消息: "配额已刷新，继续完成任务。"
-计划 reason=error=true（值 error）退避约 5s=true／到点注入=true 注入后又起一轮=true（4 → 5）→ 通过
++    44ms 假上游: http://127.0.0.1:50319（配额正常，补全固定 522）
++  1668ms 发一条消息，上游会返回 522
++  1675ms agent_start（第 1 次）
++  1978ms 已排期: 2026-10-15T05:46:03.187Z（5s 后，reason=error）
++  6848ms agent_start（第 2 次）
++  6848ms 会话内出现用户消息: "配额已刷新，继续完成任务。"
+计划 reason=error=true（值 error）退避约 5s=true／到点注入=true 注入后又起一轮=true（1 → 2）→ 通过
+pi 自己的重试=0 次（522 不在它的可重试清单里，0 才符合预期）
 ```
 
-扩展日志里同一件事的三条证据也能对上：`transient error: 连接中断 (Connection error.) retryOnError=true`（pi 的四次失败各记一条）、`wait armed: resume at ... (error, in 5s)`、`resume: injecting continuation (error)`。
+扩展日志里同一件事的三条证据也能对上：`transient error: HTTP 522 (522 status code (no body)) retryOnError=true`、`wait armed: resume at ... (error, in 5s)`、`resume: injecting continuation (error)`。
+
+`retry-empty` 换一个假上游：配额正常，补全按 openai-completions 的流式协议把 `AI Chat returned no visible response. Please try again.` 当正文返回 —— 200、正常收尾，不是错误。这条验的是「扩展比 pi 先认出来」，顺带把扩展那条「正文形态」判定的两个前提钉在真 pi 上：正文恰好一块纯文本、`stopReason` 是 `stop`。实测输出（2026-10-15）：
+
+```
++    41ms 假上游: http://127.0.0.1:65508（配额正常，补全返回空响应正文）
++  1966ms 发一条消息，上游会把空响应那句当正文返回
++  1974ms agent_start（第 1 次）
++  2078ms 空响应正文到达：stopReason=stop 内容块=1
++  2277ms 已排期: 2026-10-15T05:43:04.298Z（5s 后，reason=error）
++  7331ms agent_start（第 2 次）
++  7332ms 会话内出现用户消息: "配额已刷新，继续完成任务。"
+空响应以正文形态到达=true（stopReason=stop 内容块=1） 扩展归类为「空响应」=true pi 自己重试=0 次
+计划 reason=error=true（值 error）退避约 5s=true／到点注入=true 注入后又起一轮=true（1 → 2）→ 通过
+```
+
+这里的 `pi 自己重试=0 次` 是要断言的一项，不是旁注：pi 认为这一轮正常完成了，`auto_retry_start` 一次都不会出现，唯一接住它的是扩展。
 
 
 **RPC 模式还能当 UI 断言的通道**：`setStatus` / `notify` 在 RPC 下会以 `extension_ui_request` 事件推到 stdout（见 pi 的 `docs/rpc.md` 的 Extension UI Protocol），所以状态栏文案与通知内容都是可断言的。注意 `theme.fg()` 会在文本前后包 ANSI 转义，比对前先剥离 —— 脚本里的 `stripAnsi()` 就是干这个的。

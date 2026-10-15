@@ -28,6 +28,7 @@
     "verify:start": "node tools/verify-resume.mjs --case start",
     "verify:start-live": "node tools/verify-resume.mjs --case start-live",
     "verify:retry": "node tools/verify-resume.mjs --case retry",
+    "verify:retry-empty": "node tools/verify-resume.mjs --case retry-empty",
     "verify:compact-window": "node tools/verify-compact-window.mjs",
     "verify:compact-recovery": "node tools/verify-compact-window.mjs --recovery",
     "typecheck": "tsc --noEmit"

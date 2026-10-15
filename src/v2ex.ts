@@ -93,9 +93,9 @@ export function isQuotaExhaustedSignal(
 
 /**
  * 上游瞬时故障的类别。只有「再试一次有可能成」的错误才值得等：
- * 服务端错了、请求超时了、连接断了。
+ * 服务端错了、请求超时了、连接断了、整轮没吐出可见内容。
  */
-export type TransientErrorKind = "server" | "timeout" | "network";
+export type TransientErrorKind = "server" | "timeout" | "network" | "empty";
 
 export interface TransientError {
   kind: TransientErrorKind;
@@ -132,6 +132,20 @@ const TIMEOUT_PATTERN = /timeout|timed out/i;
 const NETWORK_PATTERN =
   /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|other side closed|UND_ERR_|connection error|network error/i;
 
+/**
+ * 「整轮没有可见内容」的报错。
+ *
+ * V2EX 在模型这一轮没吐出任何可见内容时报的就是这句，站点前端把它显示成
+ * 「AI Chat 没有返回可见内容，请重试」。两种措辞都要认：pi 拿到的可能是上游
+ * 原样的英文，也可能是被转写过的中文。
+ *
+ * 它必须在这里接住，因为两条现成的路都盖不住它：既没有 HTTP 状态码，也没有超时
+ * 或连接类的字面；而 pi 自己的可重试清单里是 `try your request again` /
+ * `please retry your request`，对不上这句的 `Please try again`。结果是 pi 一次都
+ * 不重试，本轮直接结束 —— 表现就是「干着干着突然停了」。再发一次往往就正常。
+ */
+export const EMPTY_RESPONSE_PATTERN = /no visible response|没有返回可见内容/i;
+
 function httpStatusFromMessage(message: string): number | undefined {
   const match = HTTP_STATUS_PATTERN.exec(message);
   const raw = match?.[1] ?? match?.[2] ?? match?.[3];
@@ -154,6 +168,7 @@ export function classifyTransientError(message: string): TransientError | undefi
     }
     return undefined;
   }
+  if (EMPTY_RESPONSE_PATTERN.test(message)) return { kind: "empty", label: "空响应" };
   if (TIMEOUT_PATTERN.test(message)) return { kind: "timeout", label: "请求超时" };
   if (NETWORK_PATTERN.test(message)) return { kind: "network", label: "连接中断" };
   return undefined;

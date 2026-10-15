@@ -38,6 +38,7 @@ import {
 } from "./format.ts";
 import {
   classifyTransientError,
+  EMPTY_RESPONSE_PATTERN,
   fetchQuota,
   isExhausted,
   isQuotaExhaustedSignal,
@@ -90,7 +91,7 @@ const SUBCOMMANDS: AutocompleteItem[] = [
   { value: "status off", label: "status off", description: "隐藏状态栏配额" },
   { value: "wait on", label: "wait on", description: "配额用尽时等待刷新并自动续跑" },
   { value: "wait off", label: "wait off", description: "关闭自动续跑" },
-  { value: "retry on", label: "retry on", description: "上游 5xx / 超时等瞬时故障后自动重试" },
+  { value: "retry on", label: "retry on", description: "上游 5xx / 超时 / 连接中断 / 空响应等瞬时故障后自动重试" },
   { value: "retry off", label: "retry off", description: "关闭上游故障自动重试" },
   { value: "start", label: "start", description: "已知额度用尽，立即排入等待（不必先发消息）" },
   { value: "cancel", label: "cancel", description: "取消等待中的自动续跑" },
@@ -596,7 +597,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * 上游瞬时故障（5xx / 超时 / 连接中断）。
+   * 上游瞬时故障（5xx / 超时 / 连接中断 / 整轮没有可见内容）。
    *
    * 这里只记状态，排期留给 agent_settled —— 那才是本轮真正结束、
    * 可以接下一轮的时点。在 message_end 里排期是在跟 pi 自己的收尾抢时序。
@@ -870,6 +871,20 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  /**
+   * 取出 assistant 消息里唯一的可见正文。
+   *
+   * 只有「恰好一块纯文本」才认：混进工具调用或思考块的话，这一轮就不是「整轮没有
+   * 可见内容」，不该当成空响应去重发。
+   */
+  function soleAssistantText(content: unknown): string | undefined {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content) || content.length !== 1) return undefined;
+    const block = content[0] as { type?: unknown; text?: unknown } | undefined;
+    if (!block || block.type !== "text" || typeof block.text !== "string") return undefined;
+    return block.text;
+  }
+
   pi.on("message_end", async (event, ctx) => {
     if (!active) return;
     lastCtx = ctx;
@@ -877,15 +892,26 @@ export default function (pi: ExtensionAPI) {
       role?: string;
       stopReason?: string;
       errorMessage?: string;
+      content?: unknown;
     };
     if (message.role !== "assistant") return;
-    if (message.stopReason !== "error" || !message.errorMessage) return;
-    if (QUOTA_EXHAUSTED_PATTERN.test(message.errorMessage)) {
-      handleExhausted(ctx, "错误文案");
+
+    if (message.stopReason === "error" && message.errorMessage) {
+      if (QUOTA_EXHAUSTED_PATTERN.test(message.errorMessage)) {
+        handleExhausted(ctx, "错误文案");
+        return;
+      }
+      const transient = classifyTransientError(message.errorMessage);
+      if (transient) handleTransientError(ctx, transient, message.errorMessage);
       return;
     }
-    const transient = classifyTransientError(message.errorMessage);
-    if (transient) handleTransientError(ctx, transient, message.errorMessage);
+
+    // 同一个「整轮没有可见内容」还有另一种落法：上游把它当正文返回，pi 于是认为
+    // 这一轮正常完成 —— 不报错、不重试，会话就停在那儿。这里替它认出来。
+    if (message.stopReason !== "stop") return;
+    const text = soleAssistantText(message.content);
+    if (text === undefined || !EMPTY_RESPONSE_PATTERN.test(text)) return;
+    handleTransientError(ctx, { kind: "empty", label: "空响应" }, text);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
@@ -1015,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
         notify(ctx, "上游故障自动重试已关闭", "info");
         return;
       }
-      const note = `5xx / 超时 / 连接中断时等 ${config.errorRetrySeconds}s 起退避重试，最多 ${config.maxErrorRetries} 次`;
+      const note = `5xx / 超时 / 连接中断 / 空响应时等 ${config.errorRetrySeconds}s 起退避重试，最多 ${config.maxErrorRetries} 次`;
       notify(ctx, `上游故障自动重试已开启：${note}`, "info");
       return;
     }

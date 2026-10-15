@@ -10,12 +10,13 @@
  *   node tools/verify-resume.mjs --case start # 已知额度用尽，/v2ex start 能不能直接排上
  *   node tools/verify-resume.mjs --case start-live # /v2ex start 排上后，倒计时与到点续跑能不能真的接上
  *   node tools/verify-resume.mjs --case retry # 上游 522 之后能不能按退避自动重试
+ *   node tools/verify-resume.mjs --case retry-empty # 上游把空响应那句当正文返回时，扩展能不能认出来
  *
- * 五条路径都靠 `PI_CODING_AGENT_DIR` 把 agent 目录挪到临时目录，
+ * 六条路径都靠 `PI_CODING_AGENT_DIR` 把 agent 目录挪到临时目录，
  * 绝不碰你真实的配置与等待计划；跑完自动清理。
  *
  * 其中 start / rearm 打的是真实的配额接口。本机直连不到 edge.v2ex.com 时，
- * 用 `V2EX_VERIFY_PROXY` 指一个本地代理即可（打 127.0.0.1 假服务的另外三条
+ * 用 `V2EX_VERIFY_PROXY` 指一个本地代理即可（打 127.0.0.1 假服务的另外四条
  * 不读这个变量）：
  *   V2EX_VERIFY_PROXY=http://127.0.0.1:37777 npm run verify:start
  *   V2EX_VERIFY_PROXY=http://127.0.0.1:37777 npm run verify:rearm
@@ -94,9 +95,23 @@ function writeConfig(agentDir, extra) {
   );
 }
 
+/**
+ * 准备临时 agent 目录，并把 v2ex provider 一起指到假上游。
+ *
+ * 扩展配置里的 baseUrl 只管配额查询：补全请求是 pi 自己按 models.json 发的。
+ * 只改扩展配置的话，补全照样打真实的 edge.v2ex.com，假上游永远收不到 ——
+ * 「补全固定 522」这类场景就只剩个说法，实际验的是真机上碰到的那个错。
+ * 所以两边都要改。
+ */
 function prepareAgentDir(agentDir, baseUrl, extraConfig = {}) {
   mkdirSync(agentDir, { recursive: true });
-  copyFileSync(join(homedir(), ".pi/agent/models.json"), join(agentDir, "models.json"));
+  const modelsFile = join(agentDir, "models.json");
+  copyFileSync(join(homedir(), ".pi/agent/models.json"), modelsFile);
+  if (baseUrl) {
+    const models = JSON.parse(readFileSync(modelsFile, "utf8"));
+    models.providers.v2ex.baseUrl = baseUrl;
+    writeFileSync(modelsFile, `${JSON.stringify(models, null, 2)}\n`);
+  }
   writeConfig(agentDir, {
     ...(baseUrl ? { baseUrl, apiKey: "verify-harness-key" } : {}),
     ...extraConfig,
@@ -644,8 +659,8 @@ async function caseStartLive(agentDir) {
  * 假上游：配额接口正常，但补全接口固定返回 522。
  *
  * 522 是 Cloudflare 的「连接源站超时」，2026-09-22 那次真机故障就是这个码。
- * 注意 pi 会把它压成一句 `Connection error.`，字面里看不出状态码 ——
- * 扩展的故障分类必须认这句，否则整条路都不会被触发。
+ * pi 转出来的原话是 `522 status code (no body)`，扩展的故障分类靠状态码认它。
+ * （pi 在连不上上游时给的是 `Connection error.`，那种字面走连接类规则，是另一条路。）
  */
 function startFlakyProvider() {
   const state = { completions: 0 };
@@ -682,9 +697,10 @@ function startFlakyProvider() {
 /**
  * 场景：上游返回 522，整轮会话被打断。
  *
- * pi 自己会先做三次快速重试（2s / 4s / 8s 退避），每次都重跑一轮 agent，
- * 全失败后才发 agent_settled。扩展接手的正是这个时点：按自己的退避再排一次，
- * 到点把对话接上。单元测试里用的是假 pi，只有这里能证明它跟真 pi 合得上。
+ * 522 不在 pi 的可重试清单里（清单收了 500 / 502 / 503 / 504 / 520 / 524，没有 522），
+ * 所以 pi 一次都不会重试，直接发 agent_settled。扩展接手的正是这个时点：
+ * 按自己的退避再排一次，到点把对话接上。
+ * 单元测试里用的是假 pi，只有这里能证明它跟真 pi 合得上。
  */
 async function caseRetry(agentDir) {
   const fake = await startFlakyProvider();
@@ -702,6 +718,7 @@ async function caseRetry(agentDir) {
 
   const child = spawnPi(agentDir);
   let agentStarts = 0;
+  let piRetries = 0;
   let resumedText;
   let buf = "";
 
@@ -724,6 +741,7 @@ async function caseRetry(agentDir) {
         agentStarts += 1;
         console.log(`${stamp()} agent_start（第 ${agentStarts} 次）`);
       } else if (ev.type === "auto_retry_start") {
+        piRetries += 1;
         console.log(
           `${stamp()} pi 自己的重试：第 ${ev.attempt}/${ev.maxAttempts} 次，${ev.delayMs}ms 后`,
         );
@@ -792,7 +810,222 @@ async function caseRetry(agentDir) {
       `计划 reason=error=${planOk}（值 ${plan?.reason}）退避约 ${Math.round(gapMs / 1000)}s=${backoffOk}`,
       `到点注入=${resumed !== undefined} 注入后又起一轮=${restarted}` +
         `（${startsBeforeResume} → ${agentStarts}）续跑消息进入会话=${resumedText !== undefined}`,
+      `pi 自己的重试=${piRetries} 次（522 不在它的可重试清单里，0 才符合预期）`,
       `\n${pass ? "通过" : "失败"}：上游 522 之后扩展按退避重试并把对话接上了`,
+    ].join("\n"),
+  );
+}
+
+// ------------------------------------------------------------ case: retry-empty
+
+/** V2EX 这一轮没吐出可见内容时报的原话。 */
+const EMPTY_RESPONSE = "AI Chat returned no visible response. Please try again.";
+
+/**
+ * 假上游：配额正常，补全按 openai-completions 的流式协议把这句话当正文返回。
+ *
+ * 关键在于它是一次「成功」的响应 —— 200、正常收尾，不是错误。pi 因此认为这一轮
+ * 干完了，既不报错也不重试，会话就停在那一句话上。只有扩展能认出来。
+ */
+function startEmptyResponseProvider() {
+  const state = { completions: 0 };
+  const quota = () =>
+    JSON.stringify({
+      success: true,
+      message: "fake quota",
+      result: {
+        active: true,
+        total_tokens: 8_020_000,
+        used_tokens: 0,
+        remaining_tokens: 8_020_000,
+        used_percent: 0,
+        period_start: Math.floor(Date.now() / 1000) - 60,
+        period_end: Math.floor(Date.now() / 1000) + 3600,
+        extra_usage: { pack_count: 0, total_tokens: 0, used_tokens: 0, remaining_tokens: 0 },
+      },
+    });
+  const chunk = (payload) => `data: ${JSON.stringify(payload)}\n\n`;
+  const envelope = (extra) =>
+    chunk({
+      id: "verify-empty",
+      object: "chat.completion.chunk",
+      created: 0,
+      model: "coder",
+      choices: [],
+      ...extra,
+    });
+  const server = createServer((req, res) => {
+    if (req.url.startsWith("/api/v2/chat/quota")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(quota());
+      return;
+    }
+    state.completions += 1;
+    // 先把请求体收干净再回，免得客户端还在写、连接就被判成异常。
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      res.write(
+        envelope({
+          choices: [{ index: 0, delta: { role: "assistant", content: EMPTY_RESPONSE }, finish_reason: null }],
+        }),
+      );
+      res.write(envelope({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }));
+      res.write(
+        envelope({ usage: { prompt_tokens: 12, completion_tokens: 11, total_tokens: 23 } }),
+      );
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve({ server, state, port: server.address().port }));
+  });
+}
+
+/**
+ * 场景：上游把「整轮没有可见内容」当正文返回。
+ *
+ * 这条用例要证明的是「扩展比 pi 先认出来」：补全是一次成功的流式响应，
+ * pi 不会发 auto_retry_start，也不会有 agent 级重试；唯一接住它的是扩展在
+ * `agent_settled` 时按退避排的那一次。单元测试用的是假 pi，只有这里能证明
+ * 真 pi 确实以 `stopReason=stop` 收尾、正文也确实是一块纯文本 —— 扩展那条
+ * 「正文形态」的判定正是压在这两个前提上。
+ */
+async function caseRetryEmpty(agentDir) {
+  const fake = await startEmptyResponseProvider();
+  const retrySeconds = 5;
+  prepareAgentDir(agentDir, `http://127.0.0.1:${fake.port}`, {
+    retryOnError: true,
+    errorRetrySeconds: retrySeconds,
+    maxErrorRetries: 2,
+    autoWait: false,
+    resumeBufferSeconds: 0,
+  });
+
+  console.log(`${stamp()} 假上游: http://127.0.0.1:${fake.port}（配额正常，补全返回空响应正文）`);
+
+  const child = spawnPi(agentDir);
+  let agentStarts = 0;
+  let piRetries = 0;
+  let emptyMessage;
+  let resumedText;
+  let buf = "";
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (d) => process.stdout.write(`${stamp()} [stderr] ${d}`));
+  child.stdout.on("data", (chunk) => {
+    buf += chunk;
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx).replace(/\r$/, "");
+      buf = buf.slice(idx + 1);
+      let ev;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (ev.type === "agent_start") {
+        agentStarts += 1;
+        console.log(`${stamp()} agent_start（第 ${agentStarts} 次）`);
+      } else if (ev.type === "auto_retry_start") {
+        piRetries += 1;
+        console.log(`${stamp()} pi 自己的重试：第 ${ev.attempt}/${ev.maxAttempts} 次`);
+      } else if (ev.type === "message_end" && ev.message?.role === "assistant") {
+        if (textOf(ev.message) === EMPTY_RESPONSE) {
+          emptyMessage = ev.message;
+          console.log(
+            `${stamp()} 空响应正文到达：stopReason=${ev.message.stopReason}` +
+              ` 内容块=${Array.isArray(ev.message.content) ? ev.message.content.length : "(非数组)"}`,
+          );
+        }
+      } else if (ev.type === "message_end" && ev.message?.role === "user") {
+        const text = textOf(ev.message);
+        if (text.includes(RESUME_PROMPT)) {
+          resumedText = text;
+          console.log(`${stamp()} 会话内出现用户消息: ${JSON.stringify(text.slice(0, 60))}`);
+        }
+      }
+    }
+  });
+
+  const finish = (code, lines) => {
+    child.kill();
+    fake.server.close();
+    console.log(`\n${stamp()} --- 扩展调试日志 ---`);
+    process.stdout.write(readLog(agentDir));
+    console.log(`\n${lines}`);
+    return code;
+  };
+
+  // 阶段一：等配额快照落地，确认扩展已经就绪。
+  const snapshot = await waitForLog(agentDir, (text) => text.includes("quota: active="), 30_000);
+  if (!snapshot) return finish(1, "失败：拿不到假配额快照");
+
+  console.log(`${stamp()} 发一条消息，上游会把空响应那句当正文返回`);
+  child.stdin.write(`${JSON.stringify({ type: "prompt", message: "hi" })}\n`);
+
+  // 阶段二：扩展在 agent_settled 之后排期。真 pi 这次不会自己重试，所以很快就到。
+  const armed = await waitForLog(
+    agentDir,
+    (text) => {
+      const match = /wait armed: resume at (\S+) \((error|quota), in (.+?)\)/.exec(text);
+      return match ? { iso: match[1], reason: match[2], delay: match[3] } : undefined;
+    },
+    60_000,
+  );
+  if (!armed) return finish(1, "失败：空响应之后没有排入重试");
+
+  const plan = readPlanFile(agentDir);
+  const planOk = plan?.reason === "error";
+  const gapMs = Date.parse(armed.hit.iso) - Date.now();
+  const backoffOk = gapMs > 0 && gapMs <= retrySeconds * 1000;
+  const classified = readLog(agentDir).includes("transient error: 空响应");
+  // 正文形态的前提：pi 认为这一轮正常完成，正文恰好是一块纯文本。
+  const contentShapeOk =
+    emptyMessage?.stopReason === "stop" &&
+    Array.isArray(emptyMessage.content) &&
+    emptyMessage.content.length === 1 &&
+    emptyMessage.content[0]?.type === "text";
+  console.log(
+    `${stamp()} 已排期: ${armed.hit.iso}（${armed.hit.delay} 后，reason=${armed.hit.reason}）`,
+  );
+
+  // 阶段三：到点真的把对话接上。
+  const startsBeforeResume = agentStarts;
+  const resumed = await waitForLog(
+    agentDir,
+    (text) => text.includes("resume: injecting continuation (error)"),
+    60_000,
+  );
+  await sleep(3_000);
+
+  const restarted = agentStarts > startsBeforeResume;
+  const pass =
+    contentShapeOk &&
+    classified &&
+    planOk &&
+    backoffOk &&
+    piRetries === 0 &&
+    resumed !== undefined &&
+    restarted &&
+    resumedText !== undefined;
+  return finish(
+    pass ? 0 : 1,
+    [
+      `空响应以正文形态到达=${contentShapeOk}` +
+        `（stopReason=${emptyMessage?.stopReason} 内容块=${emptyMessage?.content?.length}）` +
+        ` 扩展归类为「空响应」=${classified} pi 自己重试=${piRetries} 次`,
+      `计划 reason=error=${planOk}（值 ${plan?.reason}）退避约 ${Math.round(gapMs / 1000)}s=${backoffOk}`,
+      `到点注入=${resumed !== undefined} 注入后又起一轮=${restarted}` +
+        `（${startsBeforeResume} → ${agentStarts}）续跑消息进入会话=${resumedText !== undefined}`,
+      `\n${pass ? "通过" : "失败"}：空响应正文被扩展认出来，按退避重试并把对话接上了`,
     ].join("\n"),
   );
 }
@@ -813,8 +1046,12 @@ try {
     process.exitCode = await caseStartLive(agentDir);
   } else if (CASE === "retry") {
     process.exitCode = await caseRetry(agentDir);
+  } else if (CASE === "retry-empty") {
+    process.exitCode = await caseRetryEmpty(agentDir);
   } else {
-    console.error(`未知的 case：${CASE}（可用 resume / rearm / start / start-live / retry）`);
+    console.error(
+      `未知的 case：${CASE}（可用 resume / rearm / start / start-live / retry / retry-empty）`,
+    );
     process.exitCode = 2;
   }
 } finally {

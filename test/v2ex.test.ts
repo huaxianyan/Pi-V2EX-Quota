@@ -208,6 +208,13 @@ test("上游瞬时故障的识别：只认值得重试的那几类", () => {
   assert.equal(classifyTransientError("Connection error.")?.kind, "network");
   // 端口号长得像状态码（5000），没有 HTTP 语境就不该当成状态码。
   assert.equal(classifyTransientError("connect ECONNREFUSED 127.0.0.1:5000")?.kind, "network");
+  // V2EX 这一轮没吐出可见内容时报的就是这句。pi 自己的可重试清单里是
+  // 「try your request again」，对不上这里的「Please try again」，所以必须自己认。
+  assert.deepEqual(
+    classifyTransientError("AI Chat returned no visible response. Please try again."),
+    { kind: "empty", label: "空响应" },
+  );
+  assert.equal(classifyTransientError("AI Chat 没有返回可见内容，请重试")?.kind, "empty");
 });
 
 test("上游瞬时故障的识别：不该重试的一律返回 undefined", () => {
@@ -219,4 +226,7 @@ test("上游瞬时故障的识别：不该重试的一律返回 undefined", () =
   assert.equal(classifyTransientError("401 unauthorized"), undefined);
   assert.equal(classifyTransientError("404 status code (no body)"), undefined);
   assert.equal(classifyTransientError("模型返回了无法解析的内容"), undefined);
+  // 光有一句「请重试」不算：那是普通的失败提示，不该触发自动重发。
+  assert.equal(classifyTransientError("请求失败，请重试"), undefined);
+  assert.equal(classifyTransientError("AI Chat returned an error. Please try again."), undefined);
 });
