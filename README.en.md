@@ -327,7 +327,7 @@ npm run typecheck
 
 `tsconfig.json` covers `src/` and `test/` with `strict` + `NodeNext` + `allowImportingTsExtensions`, matching how Node runs `.ts` directly. It needs `typescript`, `@types/node`, and the two pi symlinks above.
 
-Before that config existed, `tsc --noEmit` only printed its help text because the repo had no `tsconfig.json`; and even with a config it hit `pi-smart-compact`'s `exports["./extension-api"].types`, which pointed at a `src/extension-api.ts` that is not shipped with its `./constants.ts` import — TS2307. The dependency now points at `dist/extension-api.d.ts` on the fork's `v2ex-recovery` branch (2026-10-15).
+Before that config existed, `tsc --noEmit` only printed its help text because the repo had no `tsconfig.json`; and even with a config it hit `pi-smart-compact`'s `exports["./extension-api"].types`, which pointed at a `src/extension-api.ts` that is not shipped with its `./constants.ts` import — TS2307. The dependency is fixed on the fork's `v2ex-recovery` branch: the protocol types entry now points at `dist/extension-api.d.ts`, and the declaration tree the package root entry was missing has been added (2026-10-15).
 
 ### Tracing the event sequence
 

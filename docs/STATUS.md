@@ -119,10 +119,27 @@
 - 从 git 重装依赖（删掉 `node_modules/pi-smart-compact` 后 `npm install`）确认拿到的是修复后的分支：`dist/extension-api.d.ts` 与 `.d.ts.map` 都在，`types` 指向正确；重装后 `npm run typecheck` 与 92 项 Node 测试均通过。
 - fork 的声明用本机 TypeScript 5.9.3 生成（fork devDependencies 声明的是 7.0.2，本机未装 Bun 工具链）。声明内容只有常量与接口，与编译器版本无关；但严格来说不是用 fork 声明的构建命令跑出来的，记为已知偏差。
 - 本轮未重跑 fork 的 Bun 构建、定向测试与 `release:check`，未改动 `dist/*.js`，未发布 npm。
-- fork 包根入口的 `types: ./dist/index.d.ts` 仍然缺文件：它的声明会带上 `.ts` 后缀的相对导入，而 `files` 不发布整个 `src`，补它需要另立一项。
+- fork 包根入口的 `types: ./dist/index.d.ts` 仍然缺文件：它的声明会带上 `.ts` 后缀的相对导入，而 `files` 不发布整个 `src`，补它需要另立一项。**已由下方 2026-10-15 / 06 处理。**
 
 ### 待办
 
 - 仓库仍无 `package-lock.json`；`pi-smart-compact` 按分支解析，分支移动会静默换实现。是否引入锁文件待定。
-- fork 的 `dist/index.d.ts`（包根 `types`）仍是空的，见上。
 - 真实长会话的摘要质量与上游成功率仍需观察；空响应的实际触发频率也未观察。
+
+## 2026-10-15 / 06：依赖的包根类型入口补齐
+
+状态：本地完成并提交，基线 `acbcd41`。本轮只动 fork，本仓库除文档外无代码改动。
+
+### 本轮完成
+
+- fork `huaxianyan/pi-smart-compact` 的 `v2ex-recovery` 分支：补齐整棵声明树（80 个 `.d.ts` + 80 个 `.d.ts.map`，镜像 `src/` 结构），包根 `types: ./dist/index.d.ts` 至此有文件可指。
+- 只补 `index.d.ts` 不够：它的相对导入带 `.ts` 后缀（`export { findModelById } from "./app/model-routing.ts"`），消费方要靠 `dist/` 里同名的 `.d.ts` 做扩展名替换，所以整棵树必须一起提交。`dist/*.js` 未重新打包，逐字节比对未变。
+- 顺带修好本机 fork 的依赖映射：`node_modules/@earendil-works/*` 与 `node_modules/typebox` 三个软链原先指向已不存在的 `AppData/Roaming/npm` 旧位置，现指向托管 pi 1.2.0。这处不进仓库，但不修就无法干净地生成声明。
+
+### 验证与边界
+
+- 消费端从 git 重装依赖后，同时导入包根默认导出与 `pi-smart-compact/extension-api` 子路径，`tsc` 在**关掉 `skipLibCheck`** 时零错误。`skipLibCheck` 会掩盖声明文件内部的解析失败，必须关掉才算验过；再用 `@ts-expect-error` 反证默认导出是有类型的，不是退化成 `any`。
+- 重装后 `npm run typecheck` 与 92 项 Node 测试均通过。
+- 声明用本机 TypeScript 5.9.3 生成（fork devDependencies 声明的是 7.0.2，本机没有 Bun 工具链），命令 `tsc -p tsconfig.json --emitDeclarationOnly --types node`。`--types node` 覆盖了 fork tsconfig 的 `["node","bun"]`：`@types/bun` 本机没有，而 `src/` 不使用 `Bun.` 全局（已核对）。
+- 未重跑 fork 的 Bun 构建、定向测试与 `release:check`，未发布 npm。
+- 本轮踩到的坑已记进 fork 的 `AGENTS.md`：`types` 里列出的包解析不到时，tsc 报 TS2688 之后会**跳过后续语义检查**，只输出声明、不报模块解析错误 —— 那种产物看着正常但没被真正检查过。生成声明前必须先确认依赖映射是活的。

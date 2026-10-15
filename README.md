@@ -357,7 +357,7 @@ npm run typecheck
 
 `tsconfig.json` 覆盖 `src/` 与 `test/`，`strict` + `NodeNext` + `allowImportingTsExtensions`，与 Node 直接跑 `.ts` 的方式对齐。它需要 `typescript`、`@types/node` 与上面那两个 pi 软链。
 
-写这个配置之前，`tsc --noEmit` 会因为仓库里没有 `tsconfig.json` 而只打印帮助；即使配上配置，也会撞到 `pi-smart-compact` 的 `exports["./extension-api"].types` 指向未随包发布的 `src/extension-api.ts`（它 import 的 `./constants.ts` 不在 `files` 里），报 TS2307。该依赖已在 fork 的 `v2ex-recovery` 分支上改为指向 `dist/extension-api.d.ts`（2026-10-15）。
+写这个配置之前，`tsc --noEmit` 会因为仓库里没有 `tsconfig.json` 而只打印帮助；即使配上配置，也会撞到 `pi-smart-compact` 的 `exports["./extension-api"].types` 指向未随包发布的 `src/extension-api.ts`（它 import 的 `./constants.ts` 不在 `files` 里），报 TS2307。该依赖已在 fork 的 `v2ex-recovery` 分支上修好：协议类型入口改指 `dist/extension-api.d.ts`，包根入口缺的声明树也一并补上（2026-10-15）。
 
 ### 追事件序列
 
