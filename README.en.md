@@ -298,7 +298,7 @@ The chat apiKey in `models.json` can be used directly as a Personal Access Token
 
 ### Making the editor and the tests find pi's types
 
-Two symlinks under `node_modules/@earendil-works/` pointing at the local pi installation are enough (`node_modules` is in `.gitignore`):
+After `npm install`, `node_modules/@earendil-works/` should contain `pi-coding-agent` and `pi-tui` (`node_modules` is in `.gitignore`). On this machine npm symlinks them to the managed pi installation; if it does not, add the two symlinks by hand:
 
 ```bash
 mkdir -p node_modules/@earendil-works
@@ -313,7 +313,7 @@ ln -s "$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/@earendil-wor
 npm test
 ```
 
-Node 22 ships type stripping and a test runner, so the tests run `.ts` directly — no build, no dependencies to install. They cover protocol parsing and formatting, and drive the whole extension (registration, status display, abort, wait, resume, attempt-limit stop) through a fake pi, fake context and fake quota endpoint.
+Node 22 ships type stripping and a test runner, so the tests run `.ts` directly — no build needed. They cover protocol parsing and formatting, and drive the whole extension (registration, status display, abort, wait, resume, attempt-limit stop) through a fake pi, fake context and fake quota endpoint.
 
 Watch out for machine load on the countdown cases: running the full suite spawns one process per test file, and an `await sleep(80)` was measured taking 1.6 seconds. So do not assert values that bake in scheduling delay ("the wait is exactly X seconds at the moment it is queued"); assert the shape (`等待 \ds`) with a generous margin instead. "It really ticks per second" is checked by counting how many distinct second values show up in `statusLog` — the session's poll interval is set to 3600 seconds, so those writes can only come from the countdown timer.
 
@@ -321,15 +321,13 @@ The script uses `node --test "test/**/*.test.ts"`. **Do not write `node --test t
 
 ### Type checking
 
-You need `typescript` and `@types/node`. Do not install them into this project's `node_modules`: npm will happily remove the two symlinks above. Install them elsewhere and pass `typeRoots` explicitly:
-
 ```bash
-node <elsewhere>/node_modules/typescript/bin/tsc \
-  --noEmit --strict --skipLibCheck --target es2023 \
-  --module nodenext --moduleResolution nodenext --allowImportingTsExtensions \
-  --types node --typeRoots <elsewhere>/node_modules/@types \
-  src/index.ts src/config.ts src/v2ex.ts src/format.ts
+npm run typecheck
 ```
+
+`tsconfig.json` covers `src/` and `test/` with `strict` + `NodeNext` + `allowImportingTsExtensions`, matching how Node runs `.ts` directly. It needs `typescript`, `@types/node`, and the two pi symlinks above.
+
+Before that config existed, `tsc --noEmit` only printed its help text because the repo had no `tsconfig.json`; and even with a config it hit `pi-smart-compact`'s `exports["./extension-api"].types`, which pointed at a `src/extension-api.ts` that is not shipped with its `./constants.ts` import — TS2307. The dependency now points at `dist/extension-api.d.ts` on the fork's `v2ex-recovery` branch (2026-10-15).
 
 ### Tracing the event sequence
 

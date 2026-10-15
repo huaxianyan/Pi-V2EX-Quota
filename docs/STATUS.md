@@ -98,6 +98,31 @@
 
 ### 待办
 
-- `npm run typecheck` 目前不可用：仓库没有 `tsconfig.json`，`tsc --noEmit` 只会打印帮助；补上配置后还会撞到依赖侧问题 —— `pi-smart-compact` 的 `exports["./extension-api"].types` 指向 `src/extension-api.ts`，而它 import 的 `./constants.ts` 不在该包 `files` 里，直接检查会报 TS2307。要么在 fork 里把 `types` 指向随包发布的产物，要么在本仓库用 `paths` 映射绕开。
+- `npm run typecheck` 目前不可用：仓库没有 `tsconfig.json`，`tsc --noEmit` 只会打印帮助；补上配置后还会撞到依赖侧问题 —— `pi-smart-compact` 的 `exports["./extension-api"].types` 指向 `src/extension-api.ts`，而它 import 的 `./constants.ts` 不在该包 `files` 里，直接检查会报 TS2307。要么在 fork 里把 `types` 指向随包发布的产物，要么在本仓库用 `paths` 映射绕开。**已由下方 2026-10-15 / 05 处理。**
 - 仓库没有 `package-lock.json`；`pi-smart-compact` 按分支 `v2ex-recovery` 解析，分支移动会静默换实现。是否引入锁文件待定。
 - 真实长会话的摘要质量与上游成功率仍需观察。
+
+## 2026-10-15 / 05：类型检查落地
+
+状态：本地完成并提交，基线 `c3f10a0`。本仓库补 `tsconfig.json`，依赖侧在 fork 上修类型入口。
+
+### 本轮完成
+
+- 新增 `tsconfig.json`：覆盖 `src/` 与 `test/`，`strict` + `NodeNext` + `allowImportingTsExtensions` + `noEmit`，与 Node 直接跑 `.ts` 的方式对齐。`npm run typecheck` 至此真正可用，不再只是打印帮助。
+- fork `huaxianyan/pi-smart-compact` 的 `v2ex-recovery` 分支：`exports["./extension-api"].types` 由 `src/extension-api.ts` 改为 `dist/extension-api.d.ts`，并按仓库既有构建步骤（`tsc -p tsconfig.json --emitDeclarationOnly`）生成该声明与 `.d.ts.map`，与 `dist/*.js` 一样强制入库（`dist/` 在 `.gitignore` 里）。声明自包含，只有一条对 `@earendil-works/pi-coding-agent` 的外部类型 import。运行时入口 `dist/extension-api.js` 未动。
+- `src/extension-api.ts` 继续随包发布：source map 的目标指向它，读者也能看到实现。
+- README 中英的「类型检查」一节改为 `npm run typecheck`，并记录这两处修复；「让编辑器找到 pi 的类型」一节改为以 `npm install` 的结果为主、手工软链为兜底。
+
+### 验证与边界
+
+- `npm run typecheck` 通过（`src/` + `test/` 全量，strict）。
+- 从 git 重装依赖（删掉 `node_modules/pi-smart-compact` 后 `npm install`）确认拿到的是修复后的分支：`dist/extension-api.d.ts` 与 `.d.ts.map` 都在，`types` 指向正确；重装后 `npm run typecheck` 与 92 项 Node 测试均通过。
+- fork 的声明用本机 TypeScript 5.9.3 生成（fork devDependencies 声明的是 7.0.2，本机未装 Bun 工具链）。声明内容只有常量与接口，与编译器版本无关；但严格来说不是用 fork 声明的构建命令跑出来的，记为已知偏差。
+- 本轮未重跑 fork 的 Bun 构建、定向测试与 `release:check`，未改动 `dist/*.js`，未发布 npm。
+- fork 包根入口的 `types: ./dist/index.d.ts` 仍然缺文件：它的声明会带上 `.ts` 后缀的相对导入，而 `files` 不发布整个 `src`，补它需要另立一项。
+
+### 待办
+
+- 仓库仍无 `package-lock.json`；`pi-smart-compact` 按分支解析，分支移动会静默换实现。是否引入锁文件待定。
+- fork 的 `dist/index.d.ts`（包根 `types`）仍是空的，见上。
+- 真实长会话的摘要质量与上游成功率仍需观察；空响应的实际触发频率也未观察。

@@ -328,7 +328,7 @@ x-ai-chat-extra-usage-remaining: 0
 
 ### 让编辑器与测试能找到 pi 的类型
 
-`node_modules/@earendil-works/` 下放两个指向本机 pi 安装的软链即可（`node_modules` 已在 `.gitignore` 里）：
+`npm install` 之后 `node_modules/@earendil-works/` 里应当有 `pi-coding-agent` 与 `pi-tui`（`node_modules` 已在 `.gitignore` 里）。本机 npm 会把它们软链到托管的 pi 安装上；如果没有，手工补两个软链：
 
 ```bash
 mkdir -p node_modules/@earendil-works
@@ -343,7 +343,7 @@ ln -s "$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/@earendil-wor
 npm test
 ```
 
-Node 22 自带类型擦除与测试运行器，测试直接跑 `.ts`，不需要构建，也不需要装依赖。测试覆盖协议解析与格式化，以及用假 pi、假上下文、假配额接口跑通整个扩展的注册、状态显示、中止、等待、续跑、上限停止等路径。
+Node 22 自带类型擦除与测试运行器，测试直接跑 `.ts`，不需要构建。测试覆盖协议解析与格式化，以及用假 pi、假上下文、假配额接口跑通整个扩展的注册、状态显示、中止、等待、续跑、上限停止等路径。
 
 倒计时那几条用例要留意机器负载：跑全量时各测试文件是并行进程，`await sleep(80)` 实测能被拖到 1.6 秒。所以别断言「排期那一刻余量正好是 X 秒」这种会把调度延迟算进去的值，而是放宽到形状（`等待 \ds`）并留足余量；「逐秒在走」则靠 `statusLog` 里出现了几个不同的秒数来判断 —— 会话的轮询间隔被设成 3600 秒，那些写入只可能来自倒计时的定时器。
 
@@ -351,15 +351,13 @@ Node 22 自带类型擦除与测试运行器，测试直接跑 `.ts`，不需要
 
 ### 类型检查
 
-需要 `typescript` 与 `@types/node`。注意不要把它们装进本项目的 `node_modules`：npm 会顺手清掉上面那两个软链。装到别处再显式指定 `typeRoots`：
-
 ```bash
-node <别处>/node_modules/typescript/bin/tsc \
-  --noEmit --strict --skipLibCheck --target es2023 \
-  --module nodenext --moduleResolution nodenext --allowImportingTsExtensions \
-  --types node --typeRoots <别处>/node_modules/@types \
-  src/index.ts src/config.ts src/v2ex.ts src/format.ts
+npm run typecheck
 ```
+
+`tsconfig.json` 覆盖 `src/` 与 `test/`，`strict` + `NodeNext` + `allowImportingTsExtensions`，与 Node 直接跑 `.ts` 的方式对齐。它需要 `typescript`、`@types/node` 与上面那两个 pi 软链。
+
+写这个配置之前，`tsc --noEmit` 会因为仓库里没有 `tsconfig.json` 而只打印帮助；即使配上配置，也会撞到 `pi-smart-compact` 的 `exports["./extension-api"].types` 指向未随包发布的 `src/extension-api.ts`（它 import 的 `./constants.ts` 不在 `files` 里），报 TS2307。该依赖已在 fork 的 `v2ex-recovery` 分支上改为指向 `dist/extension-api.d.ts`（2026-10-15）。
 
 ### 追事件序列
 
