@@ -143,3 +143,37 @@
 - 声明用本机 TypeScript 5.9.3 生成（fork devDependencies 声明的是 7.0.2，本机没有 Bun 工具链），命令 `tsc -p tsconfig.json --emitDeclarationOnly --types node`。`--types node` 覆盖了 fork tsconfig 的 `["node","bun"]`：`@types/bun` 本机没有，而 `src/` 不使用 `Bun.` 全局（已核对）。
 - 未重跑 fork 的 Bun 构建、定向测试与 `release:check`，未发布 npm。
 - 本轮踩到的坑已记进 fork 的 `AGENTS.md`：`types` 里列出的包解析不到时，tsc 报 TS2688 之后会**跳过后续语义检查**，只输出声明、不报模块解析错误 —— 那种产物看着正常但没被真正检查过。生成声明前必须先确认依赖映射是活的。
+
+## 2026-10-24 / 07：修掉「正常结束的轮次仍被排入重试」
+
+状态：本地完成并提交，基线 `955c0fa`。用户报告「刚结束一轮对话、额度也还有，却触发了重试」。
+
+### 根因
+
+`transientHit` 只在 `agent_settled` 里被消费，而 `message_end` 里的正常收尾分支直接 `return`，没清这个标记。pi 自己重试成功时，同一次 agent 运行里会依次来两条 `message_end`：
+
+1. `stopReason=error`（`Connection error.` / `Request timed out.` 等），扩展记下 `transientHit = true`；
+2. pi 内部退避后重试成功，`stopReason=stop`，模型正常收尾 —— 扩展在这里 `return`，标记留着；
+3. 才轮到 `agent_settled`，于是凭空排了一次重试。
+
+用户看到的就是：一轮明明正常做完了，状态栏变成 `V2EX 重试`，60 秒后又收到一条 `配额已刷新，继续完成任务。` 式的续跑消息。额度跟这件事无关 —— 走的是 `reason=error` 这条不预检额度的路。
+
+会话记录里能直接看到这个形状（`--E--Dev-Pi--` 2026-10-24T14:14:39 报 `Connection error.`，14:14:54 起 pi 自己重试成功，14:15:55 正常收尾，14:16:55 被注入续跑消息，间隔正好 60 秒）。`--E--Dev-SevenTrip--` 与 `--E--Dev-Pi-Smart-Compact--` 是同一形状的另两例。
+
+### 本轮完成
+
+- `message_end` 的正常收尾分支（`stopReason=stop` 且不是空响应）就地清 `transientHit` 与 `transientError`。注释写明为什么清在这里：`agent_settled` 比第二条 `message_end` 晚到。
+- 新增回归用例「pi 自己重试成功后，这一轮结束时不再排重试」，断言不落计划、不注入消息、不提示重试。
+
+### 验证与边界
+
+- 修前用同形状脚本复现（落盘 `reason=error` 的计划），修后同一脚本不再落计划。
+- V2EX 全量 Node 测试 93 项通过（原 92 + 新增 1）。`npm run typecheck` 通过。
+- 本轮按 `npm install` 重装了依赖（仓库无 `package-lock.json`，`pi-smart-compact` 按 `v2ex-recovery` 分支解析），未引入锁文件。
+- 只覆盖「pi 自己重试成功」这一种收敛。扩展自己排的重试在到点注入前若用户先开口，`before_agent_start` 里已有清理，行为未变。
+- 真实长会话里这个形状的触发频率未统计；本轮结论只基于会话记录中已出现的 3 例与脚本复现。
+
+### 待办
+
+- 仓库仍无 `package-lock.json`；`pi-smart-compact` 按分支解析，分支移动会静默换实现。是否引入锁文件待定。
+- 真实长会话的摘要质量与上游成功率仍需观察。

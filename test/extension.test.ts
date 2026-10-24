@@ -896,6 +896,33 @@ test("上游空响应（正文形态）也排入重试，正常回复则不动",
   }
 });
 
+test("pi 自己重试成功后，这一轮结束时不再排重试", async () => {
+  const restore = stubQuota(
+    () => 4_000_000,
+    () => Date.now() + 3_600_000,
+  );
+  try {
+    const ext = await startExtension({ retryOnError: true, errorRetrySeconds: 60 });
+    await ext.emit("session_start", { type: "session_start", reason: "startup" });
+    await sleep(60);
+
+    // 一次瞬时故障被扩展记下，随后 pi 自己重试成功，同一次运行里正常收尾。
+    await ext.emit("message_end", providerError("Connection error."));
+    await ext.emit("message_end", assistantText("已全部提交并推送。"));
+    await ext.emit("agent_settled", { type: "agent_settled" });
+
+    assert.equal(readPlan(ext.dir), undefined, "已经成功的轮次不该再排重试");
+    assert.equal(ext.sent.length, 0, "不该注入续跑消息");
+    assert.doesNotMatch(
+      ext.notifications.map((item) => item.message).join(" / "),
+      /后自动重试/,
+      "不该提示要重试",
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("关闭上游重试时空响应只提示怎么开", async () => {
   const restore = stubQuota(
     () => 4_000_000,

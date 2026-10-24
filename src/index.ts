@@ -910,7 +910,15 @@ export default function (pi: ExtensionAPI) {
     // 这一轮正常完成 —— 不报错、不重试，会话就停在那儿。这里替它认出来。
     if (message.stopReason !== "stop") return;
     const text = soleAssistantText(message.content);
-    if (text === undefined || !EMPTY_RESPONSE_PATTERN.test(text)) return;
+    if (text === undefined || !EMPTY_RESPONSE_PATTERN.test(text)) {
+      // 这一轮真的干完活了。故障标记必须就地清掉：pi 自己重试成功时，同一次
+      // agent 运行里会先来一条 stopReason=error，再来一条正常收尾的 stop，
+      // 两次 message_end 之后才轮到 agent_settled。留着标记会让已经成功的轮次
+      // 在结束时刻凭空排一次重试。
+      transientHit = false;
+      transientError = undefined;
+      return;
+    }
     handleTransientError(ctx, { kind: "empty", label: "空响应" }, text);
   });
 
