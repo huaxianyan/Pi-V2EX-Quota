@@ -177,3 +177,38 @@
 
 - 仓库仍无 `package-lock.json`；`pi-smart-compact` 按分支解析，分支移动会静默换实现。是否引入锁文件待定。
 - 真实长会话的摘要质量与上游成功率仍需观察。
+
+## 2026-10-24 / 08：查询代理回装，作用范围按「配额看全部模型、完整功能只给 V2EX」拆开
+
+状态：本地完成并提交，基线 `3f96b5a`。
+
+### 为什么把代理装回来
+
+`d96e101` 摘掉自带代理的理由是「pi 启动时把 `globalThis.fetch` 换成带 `EnvHttpProxyAgent` 的 undici 版，扩展的配额查询跟着走」。这个前提现在不成立了：对话请求改成由 `pi-proxy-router` 按模型路由（`proxy-router.json` 里 `v2ex/*` 与 `explabs/*` → `http://127.0.0.1:37777`），那条通道不碰 `globalThis.fetch`，终端里也不再设 `HTTP_PROXY`。结果是配额查询退回直连，状态栏停在 `V2EX --`。
+
+所以把 `src/proxy.ts`（`node:net` 手搭 http CONNECT / socks5 / socks4a，带协议探测）连同 `test/proxy.test.ts` 整份恢复，配额查询自己带代理，与对话那条通道互不牵连。
+
+### 作用范围
+
+- 配额与重置时间**对所有模型显示**：轮询、状态栏配额段、倒计时不再看当前 provider。
+- **完整功能只对 V2EX 模型**：自动续跑、上游重试、临时窗口、详情面板、以及状态栏那一段开关，仍在 `provider === "v2ex"` 时才有。切走时只收起这些，`latest` 不再清空。
+- 命令按同一把尺子分：`refresh` / `status on|off` / `debug on|off` / `proxy` 不限模型；`wait` / `retry` / `start` / `cancel` / `compact` 在别的模型上直接回「请先切换到 V2EX 模型」。
+
+### 本轮完成
+
+- 恢复 `src/proxy.ts` 与 `test/proxy.test.ts`；`config.ts` 回 `proxy` 字段（`normalizeProxy` 归一，认不出来的写法退回直连），`v2ex.ts` 回 `createFetch` 与 `FALLBACK_BASE_URL` / `originTarget`，`format.ts` 开关段回 `代理` 并在面板加「查询代理」一行，`index.ts` 回 `/v2ex proxy [地址|off]`。
+- `errorText` 只在 `proxy.ts` 定义一份，`index.ts` 改为 import（原先两处各写一份）。
+- `proxy.ts` 的 `RequestInfo` 换成 `Parameters<typeof fetch>[0]`：`tsconfig.json` 的 `lib` 只有 ES2024，没有那个全局类型。
+- 回归用例：切离 V2EX 后配额照显且无开关段、不在 V2EX 模型时排等待被拒而 `refresh` 可用、`proxy` 归一化、`/v2ex proxy` 设好后查询真的从代理出去（假目标 + 只转发的 CONNECT 代理，断言隧道目标）、详情面板列出代理。
+
+### 验证与边界
+
+- 120 项 Node 测试通过（原 93 + 恢复 22 + 新增 5）。`npm run typecheck` 通过。
+- 本机真接口验过两条：直连 `edge.v2ex.com` 超时（正是用户遇到的现象），经 `http://127.0.0.1:37777` 拿到 `remaining=0`。探测对 `127.0.0.1:37777` 判成 `http`，与 `proxy-router.json` 里那份一致。
+- `tools/verify-resume.mjs` 的 `caseProxy` 未恢复；它仍用 `V2EX_VERIFY_PROXY` 给 pi 子进程设环境变量，与扩展自己的 `proxy` 项是两条路，不冲突。
+- 配额查询与对话请求现在各配一处代理，这是有意的：`proxy-router.json` 管对话，`v2ex-quota.json` 的 `proxy` 管这一次查询。两处地址要一致，改一处记得改另一处。
+
+### 待办
+
+- 仓库仍无 `package-lock.json`；`pi-smart-compact` 按分支解析，分支移动会静默换实现。
+- `proxy-router.json` 与 `v2ex-quota.json` 的代理地址重复，是否需要互相读取尚未定（读别人的私有配置格式会带来静默失效风险）。

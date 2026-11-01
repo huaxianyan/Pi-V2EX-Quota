@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import { connect as netConnect } from "node:net";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -241,7 +244,7 @@ test("扩展注册命令并订阅配额相关事件", async () => {
   }
 });
 
-test("选择其他模型时保持原有报错行为，切离 V2EX 后取消等待并隐藏配额", async () => {
+test("切离 V2EX 后只收起完整功能，配额与重置时间照显", async () => {
   let delayMs = 0;
   const restore = stubQuota(
     () => 0,
@@ -270,7 +273,9 @@ test("选择其他模型时保持原有报错行为，切离 V2EX 后取消等�
     await reportErrors();
     assert.equal(ext.abortCount(), 0);
     assert.equal(ext.notifications.length, 0);
-    assert.equal(ext.statuses.size, 0);
+    // 配额与重置时间跟当前模型无关：不在 V2EX 模型上也照显，只是没有开关那一段。
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /^V2EX /);
+    assert.doesNotMatch(ext.statuses.get(STATUS_KEY) ?? "", /续跑/);
     assert.equal(readPlan(ext.dir), undefined);
 
     await select("v2ex");
@@ -289,10 +294,15 @@ test("选择其他模型时保持原有报错行为，切离 V2EX 后取消等�
     await refreshing;
     await reportErrors();
     await sleep(1_100);
-    assert.equal(ext.statuses.size, 0);
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /^V2EX /);
+    assert.doesNotMatch(ext.statuses.get(STATUS_KEY) ?? "", /续跑/);
     assert.equal(ext.widgets.size, 0);
     assert.equal(readPlan(ext.dir), undefined);
-    assert.equal(ext.notifications.length, notifications);
+    const extra = ext.notifications
+      .slice(notifications)
+      .map((item) => item.message)
+      .join(" / ");
+    assert.doesNotMatch(extra, /自动重试|已排入|等待刷新后/, "切离 V2EX 后不该再排等待或重试");
     assert.equal(ext.abortCount(), aborts);
     assert.deepEqual(ext.sent, []);
 
@@ -303,6 +313,38 @@ test("选择其他模型时保持原有报错行为，切离 V2EX 后取消等�
     assert.equal(readPlan(ext.dir), undefined);
   } finally {
     await ext.emit("session_shutdown", { type: "session_shutdown" });
+    restore();
+  }
+});
+
+test("不在 V2EX 模型时只能看配额，排等待要回到 V2EX 模型", async () => {
+  const restore = stubQuota(
+    () => 4_000_000,
+    () => Date.now() + 3_600_000,
+  );
+  try {
+    const ext = await startExtension({ autoWait: true });
+    ext.ctx.model = { provider: "explabs", id: "test-model", contextWindow: 1_000_000 };
+    await ext.emit("session_start", { type: "session_start", reason: "startup" });
+    await sleep(80);
+
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /^V2EX /, "别的模型上也要看得到配额");
+    assert.doesNotMatch(ext.statuses.get(STATUS_KEY) ?? "", /续跑/, "开关段只属于 V2EX 模型");
+
+    await ext.run("v2ex", "start");
+    assert.equal(readPlan(ext.dir), undefined, "不在 V2EX 模型上不该排等待");
+    assert.ok(
+      ext.notifications.some((item) => item.message.includes("请先切换到 V2EX 模型")),
+      `没提示要先切模型：${ext.notifications.map((item) => item.message).join(" / ")}`,
+    );
+
+    // 配额与重置时间这部分不挑模型。
+    await ext.run("v2ex", "refresh");
+    assert.ok(
+      ext.notifications.some((item) => item.message.startsWith("V2EX ")),
+      `别的模型上查不到配额：${ext.notifications.map((item) => item.message).join(" / ")}`,
+    );
+  } finally {
     restore();
   }
 });
@@ -334,16 +376,16 @@ test("改开关后状态栏立刻反映，不等下一次轮询", async () => {
     await ext.emit("session_start", { type: "session_start", reason: "startup" });
     await sleep(80);
     // 测试台的轮询间隔是 3600 秒，所以这一行只可能由开关自己触发刷新。
-    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 关 · 重试 关 · 窗口 关$/);
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 关 · 重试 关 · 代理 关 · 窗口 关$/);
 
     await ext.run("v2ex", "wait on");
-    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 开 · 重试 关 · 窗口 关$/);
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 开 · 重试 关 · 代理 关 · 窗口 关$/);
 
     await ext.run("v2ex", "retry on");
-    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 开 · 重试 开 · 窗口 关$/);
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 开 · 重试 开 · 代理 关 · 窗口 关$/);
 
     await ext.run("v2ex", "wait off");
-    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 关 · 重试 开 · 窗口 关$/);
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /续跑 关 · 重试 开 · 代理 关 · 窗口 关$/);
   } finally {
     restore();
   }
@@ -1092,3 +1134,175 @@ test("关掉上游重试后，落盘的重试计划不会被恢复", async () =>
     restore();
   }
 });
+
+/**
+ * 本机假配额服务 + 只做转发的 CONNECT 代理。
+ *
+ * 用来验证「配了代理之后，扩展的查询真的从代理出去了」——
+ * 光断言配置落盘证明不了这一点，那只能说明文件写对了。
+ */
+async function startProxyChain(): Promise<{
+  targetPort: number;
+  proxyPort: number;
+  connects: string[];
+  close: () => Promise<void>;
+}> {
+  const target = createHttpServer((_req, res) => {
+    const now = Math.floor(Date.now() / 1000);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        success: true,
+        result: {
+          active: true,
+          total_tokens: 8_000_000,
+          used_tokens: 4_000_000,
+          remaining_tokens: 4_000_000,
+          used_percent: 50,
+          period_start: now - 1_000,
+          period_end: now + 3_600,
+          extra_usage: { remaining_tokens: 0 },
+        },
+      }),
+    );
+  });
+  await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", () => resolve()));
+  const targetPort = (target.address() as AddressInfo).port;
+
+  const connects: string[] = [];
+  const proxy = createHttpServer((_req, res) => {
+    res.writeHead(400).end("只接受 CONNECT");
+  });
+  proxy.on("connect", (req, clientSocket, head) => {
+    connects.push(req.url ?? "");
+    const upstream = netConnect(targetPort, "127.0.0.1", () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length > 0) upstream.write(head);
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+    });
+    upstream.on("error", () => clientSocket.destroy());
+    clientSocket.on("error", () => upstream.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", () => resolve()));
+  const proxyPort = (proxy.address() as AddressInfo).port;
+
+  return {
+    targetPort,
+    proxyPort,
+    connects,
+    async close() {
+      target.closeAllConnections();
+      await new Promise<void>((resolve) => target.close(() => resolve()));
+      proxy.closeAllConnections();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    },
+  };
+}
+
+test("/v2ex proxy 设置后，配额查询真的从代理走", async () => {
+  const chain = await startProxyChain();
+  try {
+    const ext = await startExtension({
+      baseUrl: `http://127.0.0.1:${chain.targetPort}`,
+      apiKey: "k",
+    });
+    await ext.emit("session_start", { type: "session_start", reason: "startup" });
+    await sleep(80);
+    // 没配代理时是直连，代理这边不该有任何记录。
+    assert.deepEqual(chain.connects, [], "没配代理就不该走代理");
+    assert.match(ext.statuses.get(STATUS_KEY) ?? "", /^V2EX ████░░░░ 50% · /);
+
+    // 只写主机端口 —— 协议由探测决定，探测通了才认这个设置。
+    await ext.run("v2ex", `proxy 127.0.0.1:${chain.proxyPort}`);
+    assert.equal(
+      loadConfig(ext.dir).proxy,
+      `http://127.0.0.1:${chain.proxyPort}`,
+      "探测出来的协议该写回配置，下次就不必再试",
+    );
+    // 一次是探测建的隧道，一次是设置后的立即查询。
+    assert.deepEqual(
+      chain.connects,
+      [`127.0.0.1:${chain.targetPort}`, `127.0.0.1:${chain.targetPort}`],
+      "设置后没走代理",
+    );
+    assert.ok(
+      ext.notifications.some((item) => item.message.includes("连接正常")),
+      `没报连接正常：${ext.notifications.map((item) => item.message).join(" / ")}`,
+    );
+    // 状态栏只报开关，不回显地址。
+    const withProxy = ext.statuses.get(STATUS_KEY) ?? "";
+    assert.ok(withProxy.includes("代理 开"), `状态栏没显示代理已开：${withProxy}`);
+    assert.doesNotMatch(withProxy, new RegExp(String(chain.proxyPort)), "状态栏不该出现代理端口");
+
+    await ext.run("v2ex", "proxy off");
+    assert.equal(loadConfig(ext.dir).proxy, "");
+    assert.equal(chain.connects.length, 2, "关掉代理后不该再走代理");
+    assert.match(
+      ext.statuses.get(STATUS_KEY) ?? "",
+      /代理 关/,
+      "关掉代理后状态栏该回到「关」",
+    );
+  } finally {
+    await chain.close();
+  }
+});
+
+test("/v2ex proxy 拒绝认不出的地址与连不通的地址，且不动已有配置", async () => {
+  const ext = await startExtension({ proxy: "http://127.0.0.1:1" });
+
+  // 认不出的协议：当场告知，不静默直连也不静默存下。
+  await ext.run("v2ex", "proxy https://127.0.0.1:8443");
+  assert.equal(loadConfig(ext.dir).proxy, "http://127.0.0.1:1", "非法值不该覆盖已有配置");
+  assert.ok(
+    ext.notifications.some((item) => item.message.includes("无法识别")),
+    `没提示地址非法：${ext.notifications.map((item) => item.message).join(" / ")}`,
+  );
+
+  // 地址格式没问题但三种协议都连不通：同样算设置失败。
+  await ext.run("v2ex", "proxy 127.0.0.1:1");
+  assert.equal(loadConfig(ext.dir).proxy, "http://127.0.0.1:1", "连不通的地址不该写进配置");
+  assert.ok(
+    ext.notifications.some((item) => item.message.includes("设置失败")),
+    `没提示设置失败：${ext.notifications.map((item) => item.message).join(" / ")}`,
+  );
+
+  // 不带参数就是把当前值报出来。
+  await ext.run("v2ex", "proxy");
+  assert.ok(
+    ext.notifications.some((item) => item.message.includes("查询代理：http://127.0.0.1:1")),
+    `没报出当前代理：${ext.notifications.map((item) => item.message).join(" / ")}`,
+  );
+});
+
+test("详情面板列出当前的查询代理", async () => {
+  const ext = await startExtension({ proxy: "http://127.0.0.1:1" });
+  await ext.emit("session_start", { type: "session_start", reason: "startup" });
+  await sleep(80);
+  await ext.run("v2ex", "");
+
+  const lines = ext.widgets.get("v2ex-quota-details") ?? [];
+  assert.ok(
+    lines.some((line) => line.includes("查询代理：http://127.0.0.1:1")),
+    `详情里没有代理那行：${lines.join(" / ")}`,
+  );
+});
+
+test("调试日志记下本次会话读到的代理设置", async () => {
+  const ext = await startExtension({ proxy: "http://127.0.0.1:1", debug: true });
+  await ext.emit("session_start", { type: "session_start", reason: "startup" });
+  await sleep(80);
+
+  const log = readFileSync(join(ext.dir, "v2ex-quota.log"), "utf8");
+  assert.match(log, /proxy=http:\/\/127\.0\.0\.1:1/);
+});
+
+test("没配代理时日志里标成 none", async () => {
+  const ext = await startExtension({ debug: true });
+  await ext.emit("session_start", { type: "session_start", reason: "startup" });
+  await sleep(80);
+
+  const log = readFileSync(join(ext.dir, "v2ex-quota.log"), "utf8");
+  assert.match(log, /proxy=none/);
+});
+

@@ -65,6 +65,20 @@ test("空的续跑文案退回默认值", () => {
   assert.equal(normalizeConfig({ resumePrompt: " 接着做 " }).resumePrompt, "接着做");
 });
 
+test("查询代理按归一化写法存，认不出来就退回直连", () => {
+  assert.equal(DEFAULT_CONFIG.proxy, "");
+  // 只写主机与端口是常见写法：原样留着，协议留给探测决定，别替用户猜一个。
+  assert.equal(normalizeConfig({ proxy: "127.0.0.1:7890" }).proxy, "127.0.0.1:7890");
+  assert.equal(
+    normalizeConfig({ proxy: "socks5://127.0.0.1:1080" }).proxy,
+    "socks5://127.0.0.1:1080",
+  );
+  // 认不出来的写法不能静默直连，也不能存进配置。
+  assert.equal(normalizeConfig({ proxy: "https://127.0.0.1:7890" }).proxy, "");
+  assert.equal(normalizeConfig({ proxy: "127.0.0.1:99999" }).proxy, "");
+  assert.equal(normalizeConfig({ proxy: 42 }).proxy, "");
+});
+
 test("配置缺失时读到默认值", () => {
   assert.deepEqual(loadConfig(tempDir()), DEFAULT_CONFIG);
 });

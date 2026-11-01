@@ -15,6 +15,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { normalizeProxy } from "./proxy.ts";
+
 export const CONFIG_FILE = "v2ex-quota.json";
 export const PENDING_FILE = "v2ex-quota-pending.json";
 
@@ -45,6 +47,13 @@ export interface QuotaConfig {
   maxResumeAttempts: number;
   /** 自动续跑时注入的消息。 */
   resumePrompt: string;
+  /**
+   * 查询配额时走的代理，空串表示直连。
+   *
+   * 单独开这一项而不读 `HTTPS_PROXY`：对话请求的代理由别的扩展按模型路由，
+   * 环境变量在本机早就没设了，靠它只会让配额查询悄悄退回直连。
+   */
+  proxy: string;
   /** 覆盖从 models.json 读到的 baseUrl。 */
   baseUrl?: string;
   /** 覆盖从 models.json 读到的 apiKey。 */
@@ -65,6 +74,7 @@ export const DEFAULT_CONFIG: QuotaConfig = {
   resumeBufferSeconds: 20,
   maxResumeAttempts: 3,
   resumePrompt: "配额已刷新，继续完成任务。",
+  proxy: "",
   baseUrl: undefined,
   apiKey: undefined,
   debug: false,
@@ -149,6 +159,7 @@ export function normalizeConfig(raw: unknown): QuotaConfig {
       DEFAULT_CONFIG.maxResumeAttempts,
     ),
     resumePrompt: resumePrompt ?? DEFAULT_CONFIG.resumePrompt,
+    proxy: normalizeProxy(source["proxy"]),
     baseUrl: optionalString(source["baseUrl"]),
     apiKey: optionalString(source["apiKey"]),
     debug: source["debug"] === true,

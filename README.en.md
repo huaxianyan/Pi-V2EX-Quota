@@ -2,15 +2,16 @@
 
 [English](README.en.md) | [简体中文](README.md)
 
-Surfaces your V2EX AI Chat quota in pi's status line, automatically continues the task after the quota window resets, and can retry after a transient upstream failure.
+Surfaces your V2EX AI Chat quota in pi's status line, automatically continues the task after the quota window resets, can retry after a transient upstream failure, and can send the quota query through a local proxy of its own.
 
 ## What it does
 
-1. **Status line**: a quota bar, the remaining percentage, a countdown to the window reset (ticking per second in the final minute, turning into `即将开始` at zero), plus the current state of both toggles.
+1. **Status line**: a quota bar, the remaining percentage, a countdown to the window reset (ticking per second in the final minute, turning into `即将开始` at zero), plus the current state of the toggles. The quota and reset countdown show for every model; the toggle segment is V2EX-only.
 2. **Immediate takeover**: when the quota is exhausted (HTTP 429 with a zero token balance) it aborts the current turn at once, instead of sitting through pi's three backoff retries.
 3. **Auto-resume** (optional toggle): waits until the window resets, re-checks the quota, then injects a message so the agent picks up the unfinished work.
 4. **Upstream retry** (optional toggle, off by default): when a 5xx, timeout, dropped connection, or a round that produced no visible content kills the turn, waits out a backoff and picks the work up again.
 5. **Temporary context window** (off by default): reduces the current V2EX session's advertised window to trigger Pi's automatic compaction earlier, with the loaded Smart Compact extension handling summaries.
+6. **Query through a local proxy** (optional): puts only the quota query through your local proxy, without touching the shell's environment variables; write `host:port` and the protocol is probed for you.
 
 ## Installation
 
@@ -34,7 +35,9 @@ pi -e /path/to/pi-v2ex-quota/src/index.ts
 
 To remove: `pi remove git:github.com/huaxianyan/pi-v2ex-quota` (for a local mount, swap in that path).
 
-Configure `providers.v2ex` in `~/.pi/agent/models.json`; the quota endpoint and key are read from there. The extension is active only while a V2EX model is selected. Switching to another provider stops polling and waiting, and hides the quota UI.
+Configure `providers.v2ex` in `~/.pi/agent/models.json`; the quota endpoint and key are read from there.
+
+**The quota and reset time do not depend on the selected model**: whichever provider you are on, the status line shows V2EX's remaining quota and time to reset. **The full feature set only applies to V2EX models** — auto-resume, upstream retry, the temporary window, the details panel, and the toggle segment in the status line all appear only while the current model belongs to the `v2ex` provider; switching to another model folds them away and keeps the quota visible.
 
 Run `/v2ex` after installing and the quota shows up.
 
@@ -47,6 +50,7 @@ Run `/v2ex` after installing and the quota shows up.
 | `/v2ex status on\|off` | Whether the status line shows the quota |
 | `/v2ex wait on\|off` | Whether auto-resume is enabled |
 | `/v2ex retry on\|off` | Whether retry after transient upstream failures is enabled (off by default) |
+| `/v2ex proxy [host:port\|off]` | Show / set / clear the local proxy for quota queries; the protocol is probed and one query runs right away |
 | `/v2ex start [prompt]` | Quota is known to be exhausted — queue a wait and auto-resume right away (no need to burn a message against the wall first) |
 | `/v2ex cancel` | Cancel a pending auto-resume or upstream retry |
 | `/v2ex debug on\|off` | Write a debug log to `v2ex-quota.log` in the agent directory |
@@ -72,6 +76,7 @@ A single global file, `~/.pi/agent/v2ex-quota.json`. There is no per-project ove
 | `resumeBufferSeconds` | `20` | How long to wait past the reset time, to absorb clock skew between the server and the local machine |
 | `maxResumeAttempts` | `3` | Maximum resumes within one window, to prevent spinning |
 | `resumePrompt` | `配额已刷新，继续完成任务。` | The message injected when resuming |
+| `proxy` | empty | Local proxy for quota queries, e.g. `127.0.0.1:37777` or `socks5://127.0.0.1:1080`; empty means direct |
 | `baseUrl` | unset | Overrides the value read from `models.json` |
 | `apiKey` | unset | Overrides the value read from `models.json` |
 | `debug` | `false` | Write the debug log |
@@ -80,25 +85,25 @@ When `baseUrl` and `apiKey` are unset, they are read from `providers.v2ex` in `~
 
 ## Reading the status line
 
-One line, two segments separated by ` | `: quota first, then the state of the two toggles.
+One line, two segments separated by ` | `: quota first, then the state of the toggles.
 
 ```
-V2EX ███████░ 87% · 4h12m | 续跑 关 · 重试 关 · 窗口 关       87% remaining, resets in 4h12m, temporary window is off
-V2EX ░░░░░░░░ 0% · 2h41m | 续跑 开 · 重试 关 · 窗口 400K     Quota exhausted, no wait queued yet
-V2EX 等待 2h41m | 续跑 开 · 重试 关 · 窗口 400K              Auto-resume queued, continues when the countdown ends
-V2EX 等待 43s | 续跑 开 · 重试 关 · 窗口 400K                Under a minute left, now ticking per second
-V2EX 即将开始 | 续跑 开 · 重试 关 · 窗口 400K               Countdown hit zero; re-checking and injecting the resume
-V2EX 整理前等待 45s | 续跑 开 · 重试 关 · 窗口 400K         Compaction failed, recovery queued
-V2EX 重试 45s | 续跑 开 · 重试 开 · 窗口 暂停               Upstream failed, waiting out a backoff (unrelated to quota)
-V2EX 空闲 | 续跑 关 · 重试 关 · 窗口 关                      No active window; the next message opens one
-V2EX -- | 续跑 关 · 重试 关 · 窗口 关                        No data fetched yet
+V2EX ███████░ 87% · 4h12m | 续跑 关 · 重试 关 · 代理 关 · 窗口 关     87% remaining, resets in 4h12m, temporary window is off
+V2EX ░░░░░░░░ 0% · 2h41m | 续跑 开 · 重试 关 · 代理 关 · 窗口 400K    Quota exhausted, no wait queued yet
+V2EX 等待 2h41m | 续跑 开 · 重试 关 · 代理 关 · 窗口 400K             Auto-resume queued, continues when the countdown ends
+V2EX 等待 43s | 续跑 开 · 重试 关 · 代理 关 · 窗口 400K               Under a minute left, now ticking per second
+V2EX 即将开始 | 续跑 开 · 重试 关 · 代理 关 · 窗口 400K               Countdown hit zero; re-checking and injecting the resume
+V2EX 整理前等待 45s | 续跑 开 · 重试 关 · 代理 关 · 窗口 400K         Compaction failed, recovery queued
+V2EX 重试 45s | 续跑 开 · 重试 开 · 代理 关 · 窗口 暂停               Upstream failed, waiting out a backoff (unrelated to quota)
+V2EX 空闲 | 续跑 关 · 重试 关 · 代理 关 · 窗口 关                     No active window; the next message opens one
+V2EX -- | 续跑 关 · 重试 关 · 代理 关 · 窗口 关                       No data fetched yet
 ```
 
 **Quota segment**: both the bar and the percentage mean the **remaining** quota (not the used amount); the trailing time is until the window reset (or until the next retry when retrying). The bar is eight cells — filled is remaining, empty is dimmed one step down. It only fills completely when the quota is genuinely full: rounding would draw 97% as full, which misleads more than the number beside it.
 
 **Countdown**: above one minute it is reported in minutes (riding along with the `pollSeconds` poll); once the last minute starts it ticks every second — at minute granularity the number on screen would just sit there. When less than a second remains (including the moment it is already due but the re-check has not come back), the text becomes `即将开始` (`即将重试` on the retry path) instead of a frozen `0s`. This countdown is computed locally from the scheduled time and is not meant to match the server: after the deadline there is still a quota re-check and a message injection, so it is inherently a little late.
 
-**Toggle segment**: `续跑` (auto-resume), `重试` (upstream retry), and `窗口` (temporary window) map to `/v2ex wait`, `/v2ex retry`, and `/v2ex compact on|off`. Off entries are shown too — the point of the status line is not having to run a command to check.
+**Toggle segment**: `续跑` (auto-resume), `重试` (upstream retry), `代理` (quota proxy), and `窗口` (temporary window) map to `/v2ex wait`, `/v2ex retry`, `/v2ex proxy`, and `/v2ex compact on|off`. Off entries are shown too — the point of the status line is not having to run a command to check. The proxy reports only its on/off state, not the address: that line has no room for it, so the address lives in the `/v2ex` panel. This segment only appears while the current model belongs to the `v2ex` provider.
 
 `窗口` has three distinct inactive states: `关` means the feature is disabled; `待启用` means the switch is on but synchronization has not run yet (fresh session, or just switched to a V2EX model); `暂停` means compaction recovery failed and the window was withdrawn until you run `/v2ex compact on`. When active it shows the target, e.g. `400K`.
 
@@ -164,38 +169,28 @@ Quota exhaustion waits for a reset; timeout, connection, and empty-response fail
 
 The initial native automatic attempt may still fail before recovery begins. Recovery reuses Smart Compact extraction, summarization, and verification; it does not forcibly discard unsummarized history. Authentication and unavailable-model problems still require human intervention.
 
-## Outbound proxy (following pi; the extension manages none of its own)
+## Sending the query through a local proxy
 
-The quota query and your chat requests go through the **same proxy** — pi's global outbound setting. The extension no longer keeps a proxy setting of its own. The reason is plain: these two want the same proxy, pi already manages it well, and adding a second place to configure only creates "now I have to remember to change both".
+The quota query can go through a local proxy of its own, and that is all it affects:
 
-At startup pi swaps `globalThis.fetch` for a undici build carrying `EnvHttpProxyAgent`, and the extension's quota query uses that very `globalThis.fetch`. So **one setting covers both channels**:
-
-- the `HTTP_PROXY` / `HTTPS_PROXY` environment variables (`EnvHttpProxyAgent` reads them), or
-- `httpProxy` in `~/.pi/agent/settings.json` (pi writes it into those two variables at startup with `??=`)
-
-```json
-{
-  "httpProxy": "http://127.0.0.1:37777"
-}
+```bash
+/v2ex proxy 127.0.0.1:37777          # host and port only; the protocol is probed
+/v2ex proxy                          # show the current value
+/v2ex proxy off                      # turn it off, back to a direct connection
 ```
 
-**Set it once and it persists — no more `export` in every terminal.** That is the whole point of it over an environment variable. To bypass the proxy for some hosts, use `NO_PROXY` (comma-separated, supporting domain suffixes and IP ranges).
+**Why the extension carries its own setting**: chat requests may be routed per model by another extension (say, only some providers go through a proxy), and that path never touches `globalThis.fetch`. So neither "the shell has a proxy set" nor pi's `httpProxy` covers the one quota query the extension sends — close the terminal proxy and the status line sits on `V2EX --`. The quota query therefore brings its own proxy and stays independent of the chat-request path.
 
-The four points below were confirmed by reading pi's source and testing on this machine; tripping over any one of them looks like "I set it and nothing happened":
+**You do not have to look up the protocol**: write `127.0.0.1:37777` and the extension tries `http` → `socks5` → `socks4a` in order, keeping whichever one **actually establishes a tunnel**, and writes the recognised protocol back into the config (`socks5://127.0.0.1:1080`) so the next start does not have to probe again. If none of the three works the setting **fails** and the previous value stays — silently storing an address that cannot connect is worse than telling you right away.
 
-- **Changing it requires restarting pi; `/reload` is not enough.** At startup pi's `applyHttpProxySettings()` writes the value into `process.env.HTTP_PROXY` / `HTTPS_PROXY` with `??=`, and right after that `configureHttpDispatcher()` builds a undici `EnvHttpProxyAgent` as the global dispatcher. That agent reads the environment variables **in its constructor** and is fixed once built; `/reload` only reinstalls the dispatcher and does not re-run the step that writes the environment variables, so a hot change takes no effect.
-- **Environment variables win.** The write uses `??=`, so it only lands when the variable is empty. Leave the `HTTPS_PROXY` in your shell in place and nothing you write into settings.json matters — with both present, the shell one is what takes effect.
-- **Only agent-directory settings are read.** pi's docs state that `httpProxy` "can only be set in agent-directory settings"; writing it into a project-level `.pi/settings.json` does nothing.
-- **It is not per-provider.** pi has no provider-level proxy field — `httpProxy` is global and `NO_PROXY` can only exclude. So switching models needs no edits, but "route only one provider through the proxy" is not possible either.
+The probe targets the endpoint you actually need (`edge.v2ex.com:443`), not some easier host: the question is "can this proxy reach the target", and if the proxy's rules happen to block this endpoint, trying an easier URL would only produce a false pass.
 
-### Why the extension does not manage a proxy of its own
+To skip the probe, write the protocol explicitly: `http://`, `socks5://` (`socks://` is accepted too), and `socks4a://` are all recognised, including `http://user:pass@host:port` with credentials. An explicit protocol means only that one is tried. Proxy protocols such as `https://` are rejected on the spot rather than falling back to a direct connection — silent failure is the hardest kind to diagnose.
 
-An earlier version tried: `/v2ex proxy` hand-rolled a tunnel on `node:net` (http CONNECT / socks5 / socks4a), zero dependencies, affecting only the one quota-query request, with automatic protocol probing. The whole thing was later removed, for two reasons:
+Once set, it shows up in the status line's toggle segment: `代理 开` when on, `代理 关` when off, with the actual address in the `/v2ex` panel. **Credentials are only reported as "present", never echoed** — write `user:pass` into the address and the panel and notifications show `http://127.0.0.1:8080（含认证）`, while the stored copy keeps the credentials, since the proxy would not connect without them.
 
-1. **The thing it was meant to solve cannot be done that way.** The premise was "put the whole API behind the proxy", but it only governed the one quota query the extension itself sends — pi's chat requests take their own route, and one switch cannot cover two channels.
-2. **Covering only the quota query is unnecessary anyway.** Since pi's global fetch already carries the proxy, a second hand-rolled tunnel in the extension is duplicated work — plus another set of handshakes to write and test.
+**The implementation does not dodge Node's limitation**: the built-in `fetch` is undici, which neither reads `HTTPS_PROXY` (that only arrives with Node 24's `NODE_USE_ENV_PROXY`) nor exposes `ProxyAgent` as an importable module. So the tunnel is hand-rolled on `node:net`: http proxies over CONNECT, socks5 and socks4a each running their handshake, a TLS layer for HTTPS targets, and the bytes then handed to `http.request` as usual. Zero dependencies, at the cost of writing and testing those handshakes yourself.
 
-There is exactly one cost: **the quota query now depends on "those two environment variables being present when pi starts, or `httpProxy` being set"**. Forget it once on a machine with no direct route and the status line sits on `V2EX --` (`/v2ex debug on` shows `quota fetch failed`). That is a clear, predictable dependency — much better value than maintaining a proxy implementation long-term.
 
 ## How auto-resume works
 
@@ -383,7 +378,7 @@ V2EX_VERIFY_PROXY=http://127.0.0.1:37777 npm run verify:start
 V2EX_VERIFY_PROXY=http://127.0.0.1:37777 npm run verify:rearm
 ```
 
-`V2EX_VERIFY_PROXY` sets `HTTP_PROXY` / `HTTPS_PROXY` on the pi child process — at startup pi swaps `globalThis.fetch` for the undici build that reads those variables, and the extension's quota query uses that same fetch, so one setting puts both the quota query and the chat requests through the proxy. **The extension has no proxy setting of its own any more.** The other three cases hit fake services on `127.0.0.1`; do not set this variable for them, or the proxy's own bypass rules may get in the way.
+`V2EX_VERIFY_PROXY` sets `HTTP_PROXY` / `HTTPS_PROXY` on the pi child process — at startup pi swaps `globalThis.fetch` for the undici build that reads those variables, and these two cases run a real pi against the real endpoint, so the quota query uses that fetch. To verify a proxy through the extension's own `proxy` setting, `/v2ex proxy` is enough; no need to go through environment variables. The other three cases hit fake services on `127.0.0.1`; do not set this variable for them, or the proxy's own bypass rules may get in the way.
 
 **Do not burn quota just to make `rearm` pass.** It advances by sending a real message and waiting for a 429, so with quota to spare that message really goes out while the path never triggers. It therefore reads the quota snapshot first and, unless the quota is exhausted, prints why and skips with exit code 2 (`start` instead verifies the opposite branch, "does not queue when there is quota left").
 

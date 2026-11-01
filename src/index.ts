@@ -37,11 +37,22 @@ import {
   type StatusSegment,
 } from "./format.ts";
 import {
+  describeProbeFailure,
+  describeProxy,
+  errorText,
+  normalizeProxy,
+  parseProxySpec,
+  probeProxy,
+  proxyTextOf,
+} from "./proxy.ts";
+import {
   classifyTransientError,
   EMPTY_RESPONSE_PATTERN,
+  FALLBACK_BASE_URL,
   fetchQuota,
   isExhausted,
   isQuotaExhaustedSignal,
+  originTarget,
   parseQuotaHeaders,
   QUOTA_EXHAUSTED_PATTERN,
   quotaUrl,
@@ -93,6 +104,8 @@ const SUBCOMMANDS: AutocompleteItem[] = [
   { value: "wait off", label: "wait off", description: "关闭自动续跑" },
   { value: "retry on", label: "retry on", description: "上游 5xx / 超时 / 连接中断 / 空响应等瞬时故障后自动重试" },
   { value: "retry off", label: "retry off", description: "关闭上游故障自动重试" },
+  { value: "proxy", label: "proxy", description: "查看查询代理，或 /v2ex proxy 127.0.0.1:7890 设置" },
+  { value: "proxy off", label: "proxy off", description: "关闭查询代理，改为直连" },
   { value: "start", label: "start", description: "已知额度用尽，立即排入等待（不必先发消息）" },
   { value: "cancel", label: "cancel", description: "取消等待中的自动续跑" },
   { value: "compact window ", label: "compact window", description: "设置临时上下文窗口，例如 400k" },
@@ -102,10 +115,6 @@ const SUBCOMMANDS: AutocompleteItem[] = [
   { value: "debug on", label: "debug on", description: "写调试日志" },
   { value: "debug off", label: "debug off", description: "停止写调试日志" },
 ];
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /** 内存计划沿用同一个落盘协议，仅把等待原因补齐。 */
 interface PendingWait extends Omit<PendingResume, "cwd" | "reason"> {
@@ -198,7 +207,7 @@ export default function (pi: ExtensionAPI) {
   function refreshStatus(ctx: ExtensionContext): void {
     if (!canUseUi(ctx)) return;
     applyUi("setStatus", () => {
-      if (!active || !config.status || !endpoint) {
+      if (!config.status || !endpoint) {
         ctx.ui.setStatus(STATUS_KEY, undefined);
         return;
       }
@@ -208,11 +217,16 @@ export default function (pi: ExtensionAPI) {
         waiting: pending !== undefined,
         waitReason: pending?.reason,
         resumeAt: pending?.resumeAt,
-        toggles: {
-          autoWait: config.autoWait,
-          retryOnError: config.retryOnError,
-          compact: compactWindow.label(config),
-        },
+        // 配额与重置时间跟当前模型无关，切到别的 provider 也照显；开关那些
+        // 只在 V2EX 模型下才有意义，不是 V2EX 时不占位置。
+        toggles: active
+          ? {
+              autoWait: config.autoWait,
+              retryOnError: config.retryOnError,
+              proxy: config.proxy.trim().length > 0,
+              compact: compactWindow.label(config),
+            }
+          : undefined,
       });
       const paint = (segment: StatusSegment): string =>
         segment.tone === "dim"
@@ -247,6 +261,7 @@ export default function (pi: ExtensionAPI) {
       resumeAt: pending?.resumeAt,
       autoWaitLabel,
       retryOnErrorLabel,
+      proxyLabel: describeProxy(config.proxy),
       compactLabel: compactWindow.detail(config),
     });
   }
@@ -275,12 +290,12 @@ export default function (pi: ExtensionAPI) {
 
   /** 取一次配额快照。返回本次查询是否成功，供「以查询结果为准」的调用方判断。 */
   async function pollQuota(ctx: ExtensionContext): Promise<boolean> {
-    if (!active || !endpoint) return false;
+    if (!endpoint) return false;
     const generation = modelGeneration;
     let ok = true;
     try {
-      const snapshot = await fetchQuota(endpoint);
-      if (!active || generation !== modelGeneration) return false;
+      const snapshot = await fetchQuota(endpoint, { proxy: config.proxy });
+      if (generation !== modelGeneration) return false;
       latest = snapshot;
       log(
         `quota: active=${latest.active} remaining=${latest.remainingTokens}` +
@@ -290,7 +305,7 @@ export default function (pi: ExtensionAPI) {
       ok = false;
       log(`quota fetch failed: ${errorText(error)}`);
     }
-    if (!active || generation !== modelGeneration) return false;
+    if (generation !== modelGeneration) return false;
     refreshStatus(ctx);
     renderDetails(ctx);
     return ok;
@@ -304,7 +319,7 @@ export default function (pi: ExtensionAPI) {
 
   function startPolling(ctx: ExtensionContext): void {
     stopPolling();
-    if (!active || !config.status || !endpoint || !canUseUi(ctx)) {
+    if (!config.status || !endpoint || !canUseUi(ctx)) {
       refreshStatus(ctx);
       return;
     }
@@ -470,7 +485,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      const snapshot = await fetchQuota(endpoint);
+      const snapshot = await fetchQuota(endpoint, { proxy: config.proxy });
       if (!active || generation !== modelGeneration || pending !== current) return;
       latest = snapshot;
       log(`resume precheck: remaining=${latest.remainingTokens} reset=${latest.periodEnd}`);
@@ -543,7 +558,7 @@ export default function (pi: ExtensionAPI) {
     };
     try {
       if (endpoint) {
-        const snapshot = await fetchQuota(endpoint);
+        const snapshot = await fetchQuota(endpoint, { proxy: config.proxy });
         if (!live()) return;
         latest = snapshot;
         if (latest.active && isExhausted(latest)) { waitForQuota(); return; }
@@ -569,7 +584,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (QUOTA_EXHAUSTED_PATTERN.test(result.errorMessage)) {
         if (endpoint) {
-          const snapshot = await fetchQuota(endpoint);
+          const snapshot = await fetchQuota(endpoint, { proxy: config.proxy });
           if (!live()) return;
           latest = snapshot;
         }
@@ -741,32 +756,33 @@ export default function (pi: ExtensionAPI) {
   function selectProvider(provider: string | undefined, ctx: ExtensionContext): void {
     lastCtx = ctx;
     const nextActive = provider === "v2ex";
-    if (active === nextActive) return;
+    const changed = active !== nextActive;
     active = nextActive;
-    modelGeneration += 1;
-    if (active) {
-      endpoint = resolveEndpoint();
-      restorePending(ctx);
-      // 模型切换会重建 ctx，状态栏的窗口标签要跟着新模型走。
-      refreshStatus(ctx);
-      startPolling(ctx);
-      return;
+    if (changed) {
+      modelGeneration += 1;
+      if (active) {
+        endpoint = resolveEndpoint();
+        restorePending(ctx);
+      } else {
+        // 离开 V2EX 模型：只收起完整功能，配额与重置时间继续跟。
+        clearWait("已切换到其他 provider", ctx);
+        stopCountdown();
+        quotaHit = false;
+        transientHit = false;
+        transientError = undefined;
+        transientAttempts = 0;
+        transientAdvised = false;
+        selfResume = false;
+        detailsVisible = false;
+        stopAfterCompactFailure = false;
+        if (canUseUi(ctx)) {
+          applyUi("setWidget", () => ctx.ui.setWidget(DETAILS_KEY, undefined));
+        }
+      }
     }
-    stopPolling();
-    clearWait("已切换到其他 provider", ctx);
-    stopCountdown();
-    latest = undefined;
-    quotaHit = false;
-    transientHit = false;
-    transientError = undefined;
-    transientAttempts = 0;
-    transientAdvised = false;
-    selfResume = false;
-    detailsVisible = false;
-    stopAfterCompactFailure = false;
-    if (canUseUi(ctx)) {
-      applyUi("setWidget", () => ctx.ui.setWidget(DETAILS_KEY, undefined));
-    }
+    // 模型切换会重建 ctx，状态栏的窗口标签要跟着新模型走。
+    refreshStatus(ctx);
+    if (changed || !pollTimer) startPolling(ctx);
   }
 
   async function syncCompactWindow(ctx: ExtensionContext): Promise<void> {
@@ -795,13 +811,13 @@ export default function (pi: ExtensionAPI) {
     endpoint = resolveEndpoint();
     log(
       `session_start: mode=${ctx.mode} status=${config.status} autoWait=${config.autoWait}` +
-        ` retryOnError=${config.retryOnError}` +
+        ` retryOnError=${config.retryOnError} proxy=${config.proxy || "none"}` +
         ` endpoint=${endpoint ? quotaUrl(endpoint.baseUrl) : "missing"}`,
     );
     selectProvider(ctx.model?.provider, ctx);
     compactWindow.resume();
     await syncCompactWindow(ctx);
-    if (active && !endpoint) {
+    if (!endpoint) {
       notify(ctx, "未在 models.json 找到 v2ex provider，配额状态不可用", "warning");
     }
   });
@@ -1057,6 +1073,89 @@ export default function (pi: ExtensionAPI) {
     notify(ctx, on ? `已开启调试日志：${join(agentDir, LOG_FILE)}` : "已关闭调试日志", "info");
   }
 
+  /** 一行配额文案，`/v2ex` 与 `/v2ex refresh` 报结果用。不带开关段。 */
+  function quotaText(): string {
+    return buildStatus({
+      window: latest,
+      now: Date.now(),
+      waiting: pending !== undefined,
+      waitReason: pending?.reason,
+      resumeAt: pending?.resumeAt,
+    }).text;
+  }
+
+  /**
+   * 设置配额查询走的代理。
+   *
+   * 对话请求的代理由别的扩展按模型路由，它不碰 `globalThis.fetch`；扩展自己
+   * 这一次配额查询得自己带代理，否则关掉终端代理后状态栏就停在 `V2EX --`。
+   */
+  async function configureProxy(ctx: ExtensionContext, rest: string[]): Promise<void> {
+    const target = rest.join(" ").trim();
+    if (target.length === 0) {
+      notify(
+        ctx,
+        `查询代理：${describeProxy(config.proxy)}` +
+          "（设置：/v2ex proxy 127.0.0.1:7890，关闭：/v2ex proxy off）",
+        "info",
+      );
+      return;
+    }
+    if (target === "off" || target === "none") {
+      config = saveConfig(agentDir, { proxy: "" });
+      // 状态栏那一行里就有代理开关，改了就立刻反映，别等这次查询的结论。
+      refreshStatus(ctx);
+      log("proxy cleared");
+      // 改完立刻拿真接口验一次：地址写得对不对，用户当场就知道。
+      const cleared = await pollQuota(ctx);
+      notify(
+        ctx,
+        `查询代理已关闭，改为直连${cleared ? "，连接正常" : "，但本次查询没成功"}`,
+        cleared ? "info" : "warning",
+      );
+      return;
+    }
+
+    const spec = parseProxySpec(target);
+    if (!spec) {
+      notify(ctx, `无法识别的代理地址：${target}（写 主机:端口 即可，协议会自动试）`, "warning");
+      return;
+    }
+
+    // 探测目标就用配额接口那个地址 —— 要判断的是「能不能用它连上目标」，
+    // 换个好连的网址去试，代理规则恰好不放行配额接口时反而会给出通过的假象。
+    const probeTarget = originTarget(endpoint?.baseUrl ?? FALLBACK_BASE_URL);
+    log(`proxy probe: ${spec.text} -> ${probeTarget.host}:${probeTarget.port}`);
+    const probe = await probeProxy(spec, probeTarget, { signal: AbortSignal.timeout(20_000) });
+    if (!probe.endpoint) {
+      log(`proxy probe failed: ${describeProbeFailure(spec, probe)}`);
+      notify(
+        ctx,
+        `设置失败，${spec.host}:${spec.port} 用不通：${describeProbeFailure(spec, probe)}`,
+        "warning",
+      );
+      return;
+    }
+
+    // 存探测出来的协议而不是用户原话：下次启动就不必再试一遍，
+    // 配置里也一眼能看出当初走通的是哪一种。
+    config = saveConfig(agentDir, { proxy: normalizeProxy(proxyTextOf(probe.endpoint)) });
+    refreshStatus(ctx);
+    log(
+      `proxy set: ${describeProxy(config.proxy)}` +
+        `（试过 ${probe.attempts.map((attempt) => attempt.kind).join(" / ")}）`,
+    );
+    const fetched = await pollQuota(ctx);
+    notify(
+      ctx,
+      fetched
+        ? `配额查询已走 ${describeProxy(config.proxy)}，连接正常`
+        : `已切到 ${describeProxy(config.proxy)}，隧道能建起但这次查询没成功，` +
+            "/v2ex debug on 可看日志",
+      fetched ? "info" : "warning",
+    );
+  }
+
   pi.registerCommand("v2ex", {
     description: "查看 V2EX 配额，设置自动续跑、上游重试与临时上下文窗口",
     getArgumentCompletions: (prefix: string) => {
@@ -1064,14 +1163,20 @@ export default function (pi: ExtensionAPI) {
       return items.length > 0 ? [...items] : null;
     },
     handler: async (args, ctx) => {
-      if (!active) {
-        notify(ctx, "请先切换到 V2EX 模型，再使用 /v2ex", "info");
-        return;
-      }
       lastCtx = ctx;
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       const action = tokens[0] ?? "";
       const value = tokens[1] ?? "";
+
+      // 配额与重置时间对所有模型都看得到，所以查一次、状态栏开关、调试日志、
+      // 查询代理都不限模型；排等待、改续跑/重试开关、调临时窗口这些完整功能
+      // 只在 V2EX 模型下成立。
+      const quotaOnly = action === "" || action === "refresh" || action === "status" ||
+        action === "debug" || action === "proxy";
+      if (!quotaOnly && !active) {
+        notify(ctx, `请先切换到 V2EX 模型，再使用 /v2ex ${action}`, "info");
+        return;
+      }
 
       if (action === "compact") {
         if (value === "" || value === "status") {
@@ -1119,24 +1224,22 @@ export default function (pi: ExtensionAPI) {
       }
       if (action === "") {
         await pollQuota(ctx);
-        toggleDetails(ctx);
+        // 面板里的开关只在 V2EX 模型下有用，不在那儿时改报一次配额。
+        if (active) toggleDetails(ctx);
+        else notify(ctx, quotaText(), "info");
         return;
       }
       if (action === "refresh") {
         const fetched = await pollQuota(ctx);
-        if (!active) return;
         if (!fetched) {
           notify(ctx, "配额查询失败，开启 /v2ex debug on 可看日志", "warning");
           return;
         }
-        const view = buildStatus({
-          window: latest,
-          now: Date.now(),
-          waiting: pending !== undefined,
-          waitReason: pending?.reason,
-          resumeAt: pending?.resumeAt,
-        });
-        notify(ctx, view.text, "info");
+        notify(ctx, quotaText(), "info");
+        return;
+      }
+      if (action === "proxy") {
+        await configureProxy(ctx, tokens.slice(1));
         return;
       }
       if (action === "start") {
@@ -1168,7 +1271,8 @@ export default function (pi: ExtensionAPI) {
       notify(
         ctx,
         `未知子命令：${action}（可用 refresh / start / cancel / status on|off / wait on|off` +
-          ` / retry on|off / compact window <tokens> / compact on|off|status / debug on|off）`,
+          ` / retry on|off / proxy [地址|off] / compact window <tokens>` +
+          ` / compact on|off|status / debug on|off）`,
         "warning",
       );
     },

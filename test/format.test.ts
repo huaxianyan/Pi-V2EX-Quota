@@ -150,6 +150,7 @@ test("详情面板列出窗口用量与重置时间", () => {
     waiting: true,
     autoWaitLabel: "已开启（2h 后继续）",
     retryOnErrorLabel: "已关闭",
+  proxyLabel: "未设置（直连）",
   });
   const text = lines.join("\n");
   assert.match(text, /窗口已用 1K \/ 1K/);
@@ -167,6 +168,7 @@ test("详情面板在无窗口时说明下一条消息开新窗口", () => {
     waiting: false,
     autoWaitLabel: "已关闭",
     retryOnErrorLabel: "已开启",
+  proxyLabel: "未设置（直连）",
   });
   const text = lines.join("\n");
   assert.match(text, /没有有效窗口/);
@@ -182,6 +184,7 @@ test("详情面板在无数据时提示刷新", () => {
     waiting: false,
     autoWaitLabel: "已关闭",
     retryOnErrorLabel: "已关闭",
+  proxyLabel: "未设置（直连）",
   });
   assert.match(lines.join("\n"), /\/v2ex refresh/);
 });
@@ -284,6 +287,7 @@ test("详情面板会说明上游故障重试的到点时间", () => {
     resumeAt: NOW + 45_000,
     autoWaitLabel: "已开启",
     retryOnErrorLabel: "已开启（45s 后重试）",
+    proxyLabel: "未设置（直连）",
   });
   const text = lines.join("\n");
   assert.match(text, /上游故障，45s 后自动重试/);
@@ -303,6 +307,7 @@ test("详情面板在倒计时归零时改说即将", () => {
       waiting: true,
       autoWaitLabel: "已开启（即将继续）",
       retryOnErrorLabel: "已开启（即将重试）",
+      proxyLabel: "未设置（直连）",
       ...overrides,
     }).join("\n");
 
@@ -325,14 +330,14 @@ test("详情面板在倒计时归零时改说即将", () => {
   assert.match(error, /上游重试：已开启（即将重试）/);
 });
 
-test("状态栏尾部接上两个开关的当前状态", () => {
+test("状态栏尾部接上三个开关的当前状态", () => {
   const view = buildStatus({
     window: windowOf({ usedPercent: 50, remainingTokens: 500 }),
     now: NOW,
     waiting: false,
-    toggles: { autoWait: true, retryOnError: false },
+    toggles: { autoWait: true, retryOnError: false, proxy: false },
   });
-  assert.equal(view.text, "V2EX ████░░░░ 50% · 2h | 续跑 开 · 重试 关");
+  assert.equal(view.text, "V2EX ████░░░░ 50% · 2h | 续跑 开 · 重试 关 · 代理 关");
   assert.equal(view.level, "ok");
   // 分隔符要比段内的 ` · ` 更重，否则一行里全是同一种点，读不出分组。
   const separator = view.segments.find((segment) => segment.text === " | ");
@@ -345,9 +350,9 @@ test("临时窗口状态接在开关后面", () => {
     window: windowOf({ usedPercent: 50, remainingTokens: 500 }),
     now: NOW,
     waiting: false,
-    toggles: { autoWait: true, retryOnError: false, compact: "400K" },
+    toggles: { autoWait: true, retryOnError: false, proxy: true, compact: "400K" },
   });
-  assert.equal(view.text, "V2EX ████░░░░ 50% · 2h | 续跑 开 · 重试 关 · 窗口 400K");
+  assert.equal(view.text, "V2EX ████░░░░ 50% · 2h | 续跑 开 · 重试 关 · 代理 开 · 窗口 400K");
 });
 
 test("详情面板列出临时窗口状态", () => {
@@ -357,6 +362,7 @@ test("详情面板列出临时窗口状态", () => {
     waiting: false,
     autoWaitLabel: "已开启",
     retryOnErrorLabel: "已关闭",
+    proxyLabel: "未设置（直连）",
     compactLabel: "400,000 tokens",
   });
   assert.match(lines.join("\n"), /临时窗口：400,000 tokens/);
@@ -367,9 +373,9 @@ test("开关全关也逐个显示，不省略", () => {
     window: windowOf({ usedPercent: 50, remainingTokens: 500 }),
     now: NOW,
     waiting: false,
-    toggles: { autoWait: false, retryOnError: false },
+    toggles: { autoWait: false, retryOnError: false, proxy: false },
   });
-  assert.equal(view.text, "V2EX ████░░░░ 50% · 2h | 续跑 关 · 重试 关");
+  assert.equal(view.text, "V2EX ████░░░░ 50% · 2h | 续跑 关 · 重试 关 · 代理 关");
 });
 
 test("配置段不参与状态色，也没带进只问配额的调用", () => {
@@ -377,7 +383,7 @@ test("配置段不参与状态色，也没带进只问配额的调用", () => {
     window: windowOf({ usedPercent: 100, usedTokens: 1_000, remainingTokens: 0 }),
     now: NOW,
     waiting: false,
-    toggles: { autoWait: true, retryOnError: true },
+    toggles: { autoWait: true, retryOnError: true, proxy: true },
   });
   assert.equal(view.level, "empty", "开关开着不该把用尽的状态色改掉");
 
@@ -395,9 +401,9 @@ test("等待态与故障重试态同样带开关状态", () => {
     now: NOW,
     waiting: true,
     waitReason: "quota",
-    toggles: { autoWait: true, retryOnError: false },
+    toggles: { autoWait: true, retryOnError: false, proxy: false },
   });
-  assert.equal(waiting.text, "V2EX 等待 2h | 续跑 开 · 重试 关");
+  assert.equal(waiting.text, "V2EX 等待 2h | 续跑 开 · 重试 关 · 代理 关");
 
   const retrying = buildStatus({
     window: windowOf({ usedPercent: 50, remainingTokens: 500 }),
@@ -405,7 +411,7 @@ test("等待态与故障重试态同样带开关状态", () => {
     waiting: true,
     waitReason: "error",
     resumeAt: NOW + 45_000,
-    toggles: { autoWait: false, retryOnError: true },
+    toggles: { autoWait: false, retryOnError: true, proxy: true },
   });
-  assert.equal(retrying.text, "V2EX 重试 45s | 续跑 关 · 重试 开");
+  assert.equal(retrying.text, "V2EX 重试 45s | 续跑 关 · 重试 开 · 代理 开");
 });

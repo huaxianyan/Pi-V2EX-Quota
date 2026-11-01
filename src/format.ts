@@ -65,6 +65,8 @@ export interface StatusToggles {
   autoWait: boolean;
   /** 上游瞬时故障后是否自动重试。 */
   retryOnError: boolean;
+  /** 配额查询是否走代理。只报开关不报地址：那一行挤不下，地址在 `/v2ex` 面板里看。 */
+  proxy: boolean;
   /** 临时窗口的短标签（如 `400K`），或关/暂停/待启用。 */
   compact?: string;
 }
@@ -185,7 +187,11 @@ function buildQuotaSegment(input: StatusInput): StatusView {
 function buildToggleSegment(toggles: StatusToggles | undefined): StatusSegment | undefined {
   if (!toggles) return undefined;
   const onOff = (value: boolean) => (value ? "开" : "关");
-  const parts = [`续跑 ${onOff(toggles.autoWait)}`, `重试 ${onOff(toggles.retryOnError)}`];
+  const parts = [
+    `续跑 ${onOff(toggles.autoWait)}`,
+    `重试 ${onOff(toggles.retryOnError)}`,
+    `代理 ${onOff(toggles.proxy)}`,
+  ];
   if (toggles.compact !== undefined) parts.push(`窗口 ${toggles.compact}`);
   return {
     text: parts.join(" · "),
@@ -215,14 +221,21 @@ export function buildStatus(input: StatusInput): StatusView {
 export interface DetailsInput extends StatusInput {
   autoWaitLabel: string;
   retryOnErrorLabel: string;
+  /** 代理的展示文案，已由调用方格式化（未设置时给「未设置（直连）」）。 */
+  proxyLabel: string;
   /** 临时窗口状态；缺省时不显示这一行。 */
   compactLabel?: string;
 }
 
 /** `/v2ex` 面板的多行详情。 */
 export function buildDetails(input: DetailsInput): string[] {
-  const { window, now, waiting, waitReason, autoWaitLabel, retryOnErrorLabel, compactLabel } = input;
-  const toggles = [`自动续跑：${autoWaitLabel}`, `上游重试：${retryOnErrorLabel}`];
+  const { window, now, waiting, waitReason, autoWaitLabel, retryOnErrorLabel, proxyLabel, compactLabel } =
+    input;
+  const toggles = [
+    `自动续跑：${autoWaitLabel}`,
+    `上游重试：${retryOnErrorLabel}`,
+    `查询代理：${proxyLabel}`,
+  ];
   if (compactLabel !== undefined) toggles.push(`临时窗口：${compactLabel}`);
   const lines = [`${LABEL} AI Chat 配额`];
   if (waiting && waitReason === "compact") {
